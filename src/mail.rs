@@ -146,7 +146,7 @@ pub fn booking_link(base_url: &str, token: &str) -> String {
 }
 
 pub fn invitation_link(base_url: &str, token: &str) -> String {
-    format!("{}/invitations/accept?token={token}", base(base_url))
+    format!("{}/invitations/accept#token={token}", base(base_url))
 }
 
 pub fn verification(m: &BookingMail, link: &str) -> Email {

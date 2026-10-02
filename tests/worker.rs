@@ -588,7 +588,11 @@ async fn invitation_emails_are_queued_and_scrubbed_after_sending(pool: PgPool) {
     let mails = memory.sent();
     assert_eq!(mails.len(), 1);
     assert_eq!(mails[0].to, "new@example.com");
-    assert!(mails[0].body.contains(token) && mails[0].body.contains("/invitations/accept?token="));
+    assert!(
+        mails[0]
+            .body
+            .contains(&format!("/invitations/accept#token={token}"))
+    );
     let kept: String = sqlx::query_scalar("SELECT body FROM email_outbox")
         .fetch_one(&pool)
         .await
