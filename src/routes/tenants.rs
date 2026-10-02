@@ -13,6 +13,7 @@ use crate::{
     auth::AuthUser,
     db::{PG_UNIQUE_VIOLATION, begin_scoped},
     error::AppError,
+    plan,
     tenancy::{Role, TenantCtx},
 };
 
@@ -21,6 +22,8 @@ pub fn routes() -> Router<AppState> {
         .route("/tenants", post(create_tenant).get(list_tenants))
         .route("/t/{slug}/me", get(tenant_me))
         .route("/t/{slug}/members", get(list_members))
+        .route("/t/{slug}/plan", get(get_plan))
+        .route("/plans", get(list_plans))
 }
 
 const RESERVED_SLUGS: &[&str] = &[
@@ -179,5 +182,38 @@ async fn list_members(
     .fetch_all(&mut *tx)
     .await?;
     tx.rollback().await?;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Serialize)]
+struct PlanResponse {
+    plan: plan::Plan,
+    usage: plan::Usage,
+}
+
+/// 目前方案與用量(owner / manager)
+async fn get_plan(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+) -> Result<Json<PlanResponse>, AppError> {
+    ctx.require_manager()?;
+    let mut tx = ctx.begin(&state).await?;
+    let tz = crate::booking::tenant_timezone(&mut tx, ctx.tenant_id).await?;
+    let response = PlanResponse {
+        plan: plan::current(&mut tx, ctx.tenant_id).await?,
+        usage: plan::usage(&mut tx, tz).await?,
+    };
+    tx.rollback().await?;
+    Ok(Json(response))
+}
+
+/// 公開的方案列表(定價頁用)
+async fn list_plans(State(state): State<AppState>) -> Result<Json<Vec<plan::Plan>>, AppError> {
+    let rows = sqlx::query_as::<_, plan::Plan>(
+        "SELECT id, name, price_cents, max_staff, max_services, max_bookings_per_month
+         FROM plans ORDER BY price_cents",
+    )
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(rows))
 }

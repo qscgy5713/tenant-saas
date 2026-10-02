@@ -134,3 +134,13 @@ pub fn app_with_rate_limit(pool: PgPool, limit: u32) -> Router {
     };
     routes::router(AppState::new(pool, &config))
 }
+
+/// 以擁有者身分直接切換店家方案(模擬計費流程;店家自己沒有這個權限)
+pub async fn set_plan(pool: &PgPool, slug: &str, plan: &str) {
+    sqlx::query("UPDATE tenants SET plan_id = $2 WHERE slug = $1")
+        .bind(slug)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .unwrap();
+}

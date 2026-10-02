@@ -6,6 +6,7 @@ pub mod db;
 pub mod error;
 pub mod mail;
 pub mod outbox;
+pub mod plan;
 pub mod ratelimit;
 pub mod routes;
 pub mod tenancy;

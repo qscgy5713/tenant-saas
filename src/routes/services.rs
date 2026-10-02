@@ -12,6 +12,7 @@ use super::AppState;
 use crate::{
     db::{PG_FOREIGN_KEY_VIOLATION, pg_code},
     error::AppError,
+    plan,
     tenancy::TenantCtx,
 };
 
@@ -125,6 +126,7 @@ async fn create(
     check_price(price)?;
 
     let mut tx = ctx.begin(&state).await?;
+    plan::ensure_service_slot(&mut tx, ctx.tenant_id).await?;
     let service = sqlx::query_as::<_, Service>(
         "INSERT INTO services (tenant_id, name, duration_minutes, price_cents)
          VALUES ($1, $2, $3, $4)
@@ -180,6 +182,17 @@ async fn update(
     }
 
     let mut tx = ctx.begin(&state).await?;
+    // 重新啟用已停用的服務也會增加「啟用中」的數量,不檢查的話停用再啟用就能繞過上限
+    if req.active == Some(true) {
+        let was_active: Option<bool> =
+            sqlx::query_scalar("SELECT active FROM services WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if was_active == Some(false) {
+            plan::ensure_service_slot(&mut tx, ctx.tenant_id).await?;
+        }
+    }
     let service = sqlx::query_as::<_, Service>(
         "UPDATE services SET
             name = COALESCE($2, name),

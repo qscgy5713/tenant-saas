@@ -9,7 +9,7 @@
 - [decisions.md](docs/decisions.md):設計決策紀錄
 
 ## 狀態
-M1–M6 完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信),下一步 M7 訂閱方案與限額。
+M1–M7 完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額),下一步 M8 稽核日誌與可觀測性。尚未串接 Stripe,方案只能由營運人員改資料庫。
 
 ## 快速開始
 ```
@@ -28,6 +28,8 @@ curl 127.0.0.1:3001/health
 | POST / GET | `/tenants` | 建立店家 / 列出我所屬的店家 |
 | GET | `/t/{slug}/me` | 我在該店的角色 |
 | GET | `/t/{slug}/members` | 該店成員 |
+| GET | `/t/{slug}/plan` | 目前方案與用量(manager 以上) |
+| GET | `/plans` | 公開的方案列表 |
 | GET / POST | `/t/{slug}/services` | 服務項目清單(`?active=&limit=&offset=`)/ 新增(manager) |
 | GET / PATCH / DELETE | `/t/{slug}/services/{id}` | 查詢 / 局部更新 / 刪除(manager) |
 | GET / PUT | `/t/{slug}/members/{user_id}/services` | 員工可提供的服務(PUT 為 manager) |
@@ -57,6 +59,9 @@ curl 127.0.0.1:3001/health
 |---|---|---|
 | GET / POST | `/t/{slug}/bookings` | 列表(staff 只看自己的)/ 代客預約 |
 | PATCH | `/t/{slug}/bookings/{id}` | 改狀態(cancelled / completed / no_show)與備註 |
+
+## 方案與限額
+新店家預設「免費版」:2 位成員(含待接受的邀請)、5 項啟用中的服務、每月 50 筆預約(依店家當地月份)。超過時員工端回 **402**,顧客端一律回 409「額滿」(不暴露方案資訊)。上限依 `plans` 表,數字僅為示範。
 
 ## 寄信
 - 設定 `SMTP_URL`(例如 `smtps://user:pass@smtp.example.com:465`)與 `MAIL_FROM`,背景 worker 會寄出確認信、提醒信、邀請信。

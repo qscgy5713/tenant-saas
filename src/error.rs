@@ -17,6 +17,9 @@ pub enum AppError {
     NotFound,
     #[error("請求過於頻繁,請稍後再試")]
     TooManyRequests,
+    /// 超過訂閱方案的限額(402 Payment Required)
+    #[error("{0}")]
+    LimitReached(String),
     #[error("{0}")]
     Conflict(String),
     #[error("內部錯誤")]
@@ -43,6 +46,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            AppError::LimitReached(_) => StatusCode::PAYMENT_REQUIRED,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, "內部錯誤");

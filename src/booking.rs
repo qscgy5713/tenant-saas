@@ -274,6 +274,16 @@ pub async fn create_booking(
         return Err(AppError::BadRequest("電話長度過長".into()));
     }
 
+    // 員工代客預約直接占位,要序列化檢查;顧客自助(pending)不占位,只先擋掉明顯已額滿的申請
+    crate::plan::ensure_booking_slot(
+        tx,
+        tenant_id,
+        tz,
+        input.start,
+        initial == BookingStatus::Confirmed,
+    )
+    .await?;
+
     let service = active_service(tx, input.service_id).await?;
     let candidates = staff_free_at(tx, tz, &service, input.start, input.staff_id, None).await?;
     if candidates.is_empty() {
@@ -354,6 +364,7 @@ pub async fn create_booking(
 /// 改期:同一位員工、同一個服務,換到新的開始時間
 pub async fn reschedule_booking(
     tx: &mut Tx,
+    tenant_id: Uuid,
     tz: Tz,
     booking_id: Uuid,
     service: &ServiceInfo,
@@ -361,6 +372,17 @@ pub async fn reschedule_booking(
     new_start: DateTime<Utc>,
 ) -> Result<DateTime<Utc>, AppError> {
     check_start_in_window(new_start)?;
+
+    // 改到不同的月份就等於在那個月多占一個名額,不能用改期繞過每月上限
+    let old_start: DateTime<Utc> =
+        sqlx::query_scalar("SELECT starts_at FROM bookings WHERE id = $1")
+            .bind(booking_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if crate::plan::month_bounds(tz, old_start) != crate::plan::month_bounds(tz, new_start) {
+        crate::plan::ensure_booking_slot(tx, tenant_id, tz, new_start, true).await?;
+    }
+
     // 排除自己:否則同一時段內小幅移動(10:00 → 10:15)會和自己衝突
     let free = staff_free_at(tx, tz, service, new_start, Some(staff_id), Some(booking_id)).await?;
     if free.is_empty() {

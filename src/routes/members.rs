@@ -14,7 +14,7 @@ use crate::{
     auth::AuthUser,
     db::{PG_FOREIGN_KEY_VIOLATION, PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
     error::AppError,
-    mail, outbox,
+    mail, outbox, plan,
     tenancy::{Role, TenantCtx},
     token,
     validation::normalize_email,
@@ -37,6 +37,8 @@ pub fn routes() -> Router<AppState> {
 const INVITATION_TTL_DAYS: i64 = 7;
 /// PostgreSQL `no_data_found`,accept_invitation 用來表示「邀請無效」
 const PG_NO_DATA_FOUND: &str = "P0002";
+/// `accept_invitation` 用來表示「成員人數已達方案上限」
+const PG_CONFIGURATION_LIMIT_EXCEEDED: &str = "53400";
 
 // ---------- 邀請 ----------
 
@@ -81,6 +83,9 @@ async fn create_invitation(
     if already_member {
         return Err(AppError::Conflict("此 Email 已經是成員".into()));
     }
+
+    // 邀請會預留一個名額;在鎖內檢查並接著寫入
+    plan::ensure_staff_slot(&mut tx, ctx.tenant_id).await?;
 
     // 過期但未使用的舊邀請會卡住唯一索引,先清掉
     sqlx::query("DELETE FROM invitations WHERE email = $1::citext AND accepted_at IS NULL AND expires_at <= now()")
@@ -217,6 +222,11 @@ async fn accept_invitation(
         Ok(slug) => slug,
         Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => {
             return Err(AppError::NotFound);
+        }
+        Err(e) if pg_code(&e).as_deref() == Some(PG_CONFIGURATION_LIMIT_EXCEEDED) => {
+            return Err(AppError::LimitReached(
+                "此店家的成員人數已達方案上限,請聯絡店家".into(),
+            ));
         }
         Err(e) => return Err(e.into()),
     };

@@ -271,3 +271,9 @@ CREATE POLICY tenant_isolation ON services
 - `bookings.confirmed_at`(確認時間;提醒信規則用)、`bookings.reminder_queued_at`
 - `email_outbox`:`dedupe_key` 唯一,同一件事只排一封信;`tenant_app` 只有 SELECT / INSERT(請求內只能排信,不能改或刪)
 - 角色 `tenant_worker`:`NOLOGIN NOBYPASSRLS`,明確授權 `email_outbox`(完整)、`bookings`(讀 / 更新)、`customers`、`services`、`tenants`(唯讀)、`users(id, name)`;對應的 RLS 政策都寫明 `TO tenant_worker`
+
+## 補充:M7 新增(`0008_plans.sql`)
+- `plans(id, name, price_cents, max_staff, max_services, max_bookings_per_month)`,NULL 表示不限;預設三個方案:free(2 人 / 5 服務 / 50 預約)、pro(10 / 50 / 1000)、business(不限)。數字只是示範,上線前要依實際定價調整
+- `tenants.plan_id`(預設 `free`);`tenant_app`、`tenant_worker` 對 `plans` 只有 SELECT
+- `accept_invitation()` 改為同時檢查人數上限,超過回 SQLSTATE `53400`(`configuration_limit_exceeded`)
+- 鎖 key 格式:`quota:{staff|services|bookings}:{tenant_id}`,雜湊用 `hashtextextended(key, 0)`

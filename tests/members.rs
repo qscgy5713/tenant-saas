@@ -4,7 +4,7 @@ use axum::{
     Router,
     http::{Method, StatusCode},
 };
-use common::{add_member, app, call, create_tenant, signup, user_id};
+use common::{add_member, app, call, create_tenant, set_plan, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -103,6 +103,7 @@ async fn invite_permissions_and_validation(pool: PgPool) {
     let manager = signup(&app, "m@example.com").await;
     let staff = signup(&app, "s@example.com").await;
     create_tenant(&app, &owner, "shop-a").await;
+    set_plan(&pool, "shop-a", "business").await; // 免費版人數上限 2,這個測試要邀請很多人
     add_member(&pool, "shop-a", "m@example.com", "manager").await;
     add_member(&pool, "shop-a", "s@example.com", "staff").await;
 
@@ -192,6 +193,7 @@ async fn expired_and_revoked_invitations(pool: PgPool) {
     let manager = signup(&app, "m@example.com").await;
     let invitee = signup(&app, "b@example.com").await;
     create_tenant(&app, &owner, "shop-a").await;
+    set_plan(&pool, "shop-a", "business").await; // 免費版人數上限 2,這個測試要邀請很多人
     add_member(&pool, "shop-a", "m@example.com", "manager").await;
 
     // 過期

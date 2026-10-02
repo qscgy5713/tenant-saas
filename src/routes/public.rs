@@ -22,7 +22,7 @@ use crate::{
     booking::{self, BookingStatus, NewBooking, PENDING_TTL_HOURS},
     db::{PG_EXCLUSION_VIOLATION, Tx, begin_scoped, pg_code, set_tenant},
     error::AppError,
-    mail, outbox, token,
+    mail, outbox, plan, token,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -42,6 +42,16 @@ pub fn routes() -> Router<AppState> {
             "/public/bookings/{token}/reschedule",
             post(reschedule_booking),
         )
+}
+
+/// 對顧客不暴露店家的方案與限額:額滿一律說成「該月份已額滿」(顧客也無法升級方案)
+fn hide_plan_details(err: AppError) -> AppError {
+    match err {
+        AppError::LimitReached(_) => {
+            AppError::Conflict("這家店該月份的預約已額滿,請選擇其他月份或直接聯絡店家".into())
+        }
+        other => other,
+    }
 }
 
 /// 依網址代稱開啟已設定租戶上下文的交易。店家不存在或已停權一律 404。
@@ -204,8 +214,9 @@ async fn create_booking(
     Json(req): Json<NewBooking>,
 ) -> Result<(StatusCode, Json<BookingRequested>), AppError> {
     let (mut tx, tenant_id, tz) = open_shop(&state, &slug).await?;
-    let created =
-        booking::create_booking(&mut tx, tenant_id, tz, req, BookingStatus::Pending).await?;
+    let created = booking::create_booking(&mut tx, tenant_id, tz, req, BookingStatus::Pending)
+        .await
+        .map_err(hide_plan_details)?;
 
     let ctx = booking::mail_ctx(&mut tx, created.id).await?;
     let link = mail::booking_link(&state.public_base_url, &created.token);
@@ -332,6 +343,21 @@ async fn confirm_booking(
         ));
     }
 
+    // 確認就是占位,要計入每月額度:序列化檢查。額滿就把這筆標為取消並明確告知(而不是讓連結一直掛著)
+    if let Err(err) = plan::ensure_booking_slot(&mut tx, tenant_id, tz, starts_at, true).await {
+        if matches!(err, AppError::LimitReached(_)) {
+            sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Err(AppError::Conflict(
+                "這家店本月預約已額滿,暫時無法接受新預約".into(),
+            ));
+        }
+        return Err(err);
+    }
+
     // 這一刻才真正占住時段,由排除約束把關;用 savepoint 才能在衝突後繼續更新狀態
     let mut sp = tx.begin().await?;
     let result =
@@ -389,10 +415,12 @@ async fn reschedule_booking(
     Path(raw): Path<String>,
     Json(req): Json<RescheduleRequest>,
 ) -> Result<Json<PublicBooking>, AppError> {
-    let (mut tx, _, tz) = open_by_token(&state, &raw).await?;
+    let (mut tx, tenant_id, tz) = open_by_token(&state, &raw).await?;
     let (id, service_id, staff_id) = lock_changeable(&mut tx, &raw, false).await?;
     let service = booking::active_service(&mut tx, service_id).await?;
-    booking::reschedule_booking(&mut tx, tz, id, &service, staff_id, req.start).await?;
+    booking::reschedule_booking(&mut tx, tenant_id, tz, id, &service, staff_id, req.start)
+        .await
+        .map_err(hide_plan_details)?;
     let view = load_by_token(&mut tx, &raw).await?;
     tx.commit().await?;
     Ok(Json(view))
