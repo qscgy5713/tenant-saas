@@ -1,65 +1,10 @@
-use axum::{
-    Router,
-    body::Body,
-    http::{Method, Request, StatusCode, header},
-};
-use http_body_util::BodyExt;
-use serde_json::{Value, json};
+mod common;
+
+use axum::http::{Method, StatusCode};
+use common::{app, call, register, test_config};
+use serde_json::json;
 use sqlx::PgPool;
-use tenant_saas::{
-    config::Config,
-    routes::{self, AppState},
-};
-use tower::ServiceExt;
-
-fn test_config(ttl: u64) -> Config {
-    Config {
-        database_url: String::new(),
-        bind_addr: String::new(),
-        jwt_secret: "test-secret-test-secret-test-secret-123".into(),
-        jwt_ttl_secs: ttl,
-    }
-}
-
-fn app(pool: PgPool) -> Router {
-    routes::router(AppState::new(pool, &test_config(3600)))
-}
-
-async fn call(
-    app: &Router,
-    method: Method,
-    uri: &str,
-    body: Option<Value>,
-    token: Option<&str>,
-) -> (StatusCode, Value) {
-    let mut req = Request::builder().method(method).uri(uri);
-    if let Some(t) = token {
-        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
-    }
-    let req = match body {
-        Some(b) => req
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(b.to_string())),
-        None => req.body(Body::empty()),
-    }
-    .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
-    let status = res.status();
-    let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
-}
-
-async fn register(app: &Router, email: &str, password: &str) -> (StatusCode, Value) {
-    call(
-        app,
-        Method::POST,
-        "/auth/register",
-        Some(json!({"email": email, "password": password, "name": "小明"})),
-        None,
-    )
-    .await
-}
+use tenant_saas::config::Config;
 
 #[sqlx::test]
 async fn register_then_me(pool: PgPool) {

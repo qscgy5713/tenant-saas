@@ -3,10 +3,11 @@
 ## 設計原則
 1. **租戶資料表一律有 `tenant_id`**,並啟用 RLS(`ENABLE` + `FORCE`),政策失敗時預設「看不到任何資料」。
 2. **跨租戶參照用複合外鍵**:例如 `bookings(tenant_id, service_id)` 參照 `services(tenant_id, id)`,資料庫層就擋住「A 店的預約指向 B 店的服務」。
-3. **兩個資料庫角色**:
-   - `tenant_owner`:擁有資料表、執行 migration。表擁有者預設會繞過 RLS,所以**應用程式不用這個角色**。
-   - `tenant_app`:應用程式連線用,`NOBYPASSRLS`,只有 SELECT / INSERT / UPDATE / DELETE。
-4. **租戶上下文**:每個請求開 transaction 後 `SELECT set_config('app.tenant_id', $1, true)`(等同 `SET LOCAL`)。未設定時 `current_setting('app.tenant_id', true)` 為 NULL,比對結果為 NULL,等於看不到任何資料。
+3. **兩個資料庫角色(M3 實作版)**:
+   - 連線使用者(開發環境是 `tenant`):擁有資料表、執行 migration。擁有者與超級使用者預設會繞過 RLS。
+   - `tenant_app`:`NOLOGIN NOBYPASSRLS`,只有必要的 SELECT / INSERT / UPDATE / DELETE。應用程式**不直接以它連線**,而是每個租戶交易開頭 `SET LOCAL ROLE tenant_app`(見 `src/db.rs` 的 `begin_scoped`),交易結束角色自動還原。
+   - 正式環境部署時,連線使用者必須是 `tenant_app` 的成員(migration 只會 `GRANT tenant_app TO CURRENT_USER`,若 migrator 與應用程式連線帳號不同,需另外授權),且**不可是超級使用者**。
+4. **租戶上下文**:`begin_scoped` 同一個交易內 `set_config('app.user_id' / 'app.tenant_id', ..., true)`(等同 `SET LOCAL`)。SQL 輔助函式 `app_user_id()`、`app_tenant_id()` 回傳 uuid,未設定時為 NULL,比對結果為 NULL,等於看不到任何資料。
 5. 主鍵用 UUID(`gen_random_uuid()`),時間一律 `timestamptz`。
 
 需要的 extension:`btree_gist`(排除約束)、`citext`(Email 不分大小寫)。
@@ -63,31 +64,34 @@ CREATE INDEX ON memberships (user_id);
 ```
 
 ### 全域表的 RLS(特殊)
-`users` 不開 RLS(登入時要用 Email 查,此時還沒有租戶)。但 `tenants`、`memberships` 要能支援「列出我所屬的所有店」,所以政策多一個 `app.user_id`:
+`users` 不開 RLS(登入時要用 Email 查,此時還沒有租戶),但 `tenant_app` 只被授權讀 `id, email, name, created_at` 這幾個欄位,**讀不到 `password_hash`**(測試有驗證)。
+
+`tenants`、`memberships` 要能支援「列出我所屬的所有店」,所以政策同時看使用者與租戶。以下是**實際 migration 的版本**(`0002_tenancy.sql`),以此為準:
 
 ```sql
--- memberships:看得到自己的所有關係,或目前租戶內的所有成員
-CREATE POLICY memberships_access ON memberships
-  USING (
-    user_id   = nullif(current_setting('app.user_id',   true), '')::uuid
- OR tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid
-  )
-  WITH CHECK (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);
+-- memberships:已選定租戶時「只」看得到該租戶的成員;未選定時只看得到自己的關係。
+-- (早期草稿用 OR,會讓使用者在 A 店的上下文裡同時看到自己在 B 店的關係,已修正。)
+CREATE POLICY memberships_access ON memberships FOR ALL
+  USING (CASE WHEN app_tenant_id() IS NOT NULL
+              THEN tenant_id = app_tenant_id()
+              ELSE user_id = app_user_id() END)
+  WITH CHECK (tenant_id = app_tenant_id());
 
--- tenants:看得到目前租戶,或自己所屬的租戶
-CREATE POLICY tenants_access ON tenants
-  USING (
-    id = nullif(current_setting('app.tenant_id', true), '')::uuid
- OR id IN (SELECT tenant_id FROM memberships
-           WHERE user_id = nullif(current_setting('app.user_id', true), '')::uuid)
-  );
+-- tenants:只讀。已選定租戶時只看得到它;未選定時看得到自己所屬的
+CREATE POLICY tenants_select ON tenants FOR SELECT USING (
+  id = app_tenant_id()
+  OR (app_tenant_id() IS NULL
+      AND id IN (SELECT tenant_id FROM memberships WHERE user_id = app_user_id()))
+);
 ```
 
-建立新店(INSERT tenants + 第一筆 owner membership)與「用 slug 解析租戶」這兩個動作,當下還沒有租戶上下文,用兩個 `SECURITY DEFINER` 函式處理,只開放最小功能:
+`tenants`、`memberships` 只 `ENABLE`、不 `FORCE` RLS:`SECURITY DEFINER` 函式以擁有者身分寫入,需要能繞過。租戶資料表(`services` 等)則 `ENABLE` + `FORCE`。
 
-- `create_tenant(user_id, slug, name, timezone) -> uuid`:建立店家並把呼叫者設為 owner
-- `tenant_id_by_slug(slug) -> uuid`:公開預約頁依子網域取得租戶 id
-- `accept_invitation(token_hash, user_id) -> uuid`:被邀請者點連結時還不是成員,沒有租戶上下文,由函式驗證 token、檢查期限並建立 membership
+建立新店(INSERT tenants + 第一筆 owner membership)與「用 slug 解析租戶」這兩個動作,當下還沒有租戶上下文,用 `SECURITY DEFINER` 函式處理,只開放最小功能:
+
+- `create_tenant(slug, name, timezone) -> uuid`:建立店家並把呼叫者設為 owner。**使用者取自請求上下文 `app_user_id()`,不接受參數**,避免替別人建立。已實作(M3)
+- `tenant_id_by_slug(slug) -> uuid`:公開預約頁依子網域取得租戶 id(M4.5 實作)
+- `accept_invitation(token_hash) -> uuid`(M5 實作,使用者取自上下文):被邀請者點連結時還不是成員,沒有租戶上下文,由函式驗證 token、檢查期限並建立 membership
 
 已知限制:`users` 沒有 RLS,`tenant_app` 若遭 SQL injection 可讀到所有使用者的 Email 與密碼雜湊。緩解方式是應用程式只用參數化查詢,並在 M2 評估是否把 `users` 的查詢也包進 `SECURITY DEFINER` 函式(例如 `find_user_for_login(email)`),避免 `tenant_app` 直接擁有整張表的 SELECT。
 
@@ -240,6 +244,9 @@ CREATE POLICY tenant_isolation ON services
 權限在應用層(axum extractor)檢查;RLS 只負責租戶隔離,不負責角色。
 
 ## 隔離測試清單(M3 必做)
+
+狀態:1、2、3、4、6、7 已在 `tests/tenancy.rs` 實作並通過;5、8 要等 `bookings` 資料表(M4.5)。另做過破壞性驗證:移除 `services` 的 RLS 後有 5 項測試失敗,證明測試確實守著隔離。
+
 1. 租戶 A 的請求查 `services`,看不到租戶 B 的資料
 2. 未設定 `app.tenant_id` 時,所有租戶表查詢都回 0 筆
 3. 租戶 A 嘗試 INSERT 帶 B 的 `tenant_id`,被 `WITH CHECK` 擋下

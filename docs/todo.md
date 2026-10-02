@@ -25,19 +25,28 @@
 - [x] 認證 extractor
 
 ## M3 多租戶核心
-- [ ] 確認 `schema.md` 的設計與 6 項決定
-- [ ] tenants、memberships 資料表
-- [ ] 租戶識別 middleware
-- [ ] 啟用 RLS 與 policy
-- [ ] 交易內 `SET LOCAL app.tenant_id` 封裝
-- [ ] **跨租戶隔離測試**(A 看不到 B)
-- [ ] 使用者可屬於多個租戶並可切換
+- [x] 確認 `schema.md` 的設計與 6 項決定(照預設)
+- [x] tenants、memberships 資料表
+- [x] 租戶識別 middleware
+- [x] 啟用 RLS 與 policy
+- [x] 交易內 `SET LOCAL app.tenant_id` 封裝
+- [x] **跨租戶隔離測試**(A 看不到 B)
+- [x] 使用者可屬於多個租戶並可切換
+- [ ] 限制單一使用者可建立的店家數量(目前任何登入者可無限建立)
+- [x] 邀請員工加入(invitations、accept_invitation)
+- [x] 成員管理:改角色(僅 owner)、移除 / 自己退出(owner 不可被移除)
+- [ ] 接受邀請與登入的限流(防止猜 token / 暴力破解)
+- [ ] 正式環境部署的資料庫角色說明(連線使用者非超級使用者)
 
 ## M4 業務模組
-- [ ] 服務項目(services)CRUD
-- [ ] 員工與可提供服務
-- [ ] 每週營業時間與休假日
-- [ ] 分頁、篩選
+- [x] 服務項目(services)CRUD
+- [x] 員工與可提供服務
+- [x] 每週營業時間與休假日
+- [x] 分頁、篩選
+
+## M4 後續
+- [ ] 休假清單分頁(目前上限 500 筆)
+- [ ] 稽核日誌(服務、營業時間異動)
 
 ## M4.5 預約核心
 - [ ] 店家時區設定
@@ -48,7 +57,7 @@
 - [ ] 併發預約測試(同時搶同一時段只有一個成功)
 
 ## M5 權限
-- [ ] 角色定義(admin / operator / viewer)
+- [x] 角色定義:owner / manager / staff(M4 已先做 `require_manager`、`require_manager_or_self`)
 - [ ] 權限檢查 extractor
 - [ ] 平台超級管理員
 

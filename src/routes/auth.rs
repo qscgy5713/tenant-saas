@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::AppState;
 use crate::{
     auth::{AuthUser, hash_password, verify_dummy, verify_password},
+    db::PG_UNIQUE_VIOLATION,
     error::AppError,
 };
 
@@ -47,9 +48,7 @@ struct AuthResponse {
     user: UserResponse,
 }
 
-const PG_UNIQUE_VIOLATION: &str = "23505";
-
-fn normalize_email(raw: &str) -> Result<String, AppError> {
+pub(super) fn normalize_email(raw: &str) -> Result<String, AppError> {
     let email = raw.trim();
     let valid = email.len() <= 254
         && !email.chars().any(char::is_whitespace)

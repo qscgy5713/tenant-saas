@@ -11,6 +11,10 @@ pub enum AppError {
     BadRequest(String),
     #[error("未登入或憑證無效")]
     Unauthorized,
+    #[error("沒有權限執行此操作")]
+    Forbidden,
+    #[error("找不到資源")]
+    NotFound,
     #[error("{0}")]
     Conflict(String),
     #[error("內部錯誤")]
@@ -34,6 +38,8 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, "內部錯誤");
