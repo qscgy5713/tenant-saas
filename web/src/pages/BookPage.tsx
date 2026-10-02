@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { shopSlotSource, useServices, useShop, useStaff } from '../api/queries'
-import { createBooking } from '../api/public'
+import { createBooking, resendVerification } from '../api/public'
 import type { BookingRequested } from '../api/types'
 import { DetailsForm } from '../components/DetailsForm'
 import { CheckIcon, MailIcon } from '../components/Icons'
@@ -17,6 +17,46 @@ import type { CustomerForm } from '../lib/validate'
 import { formatDateTime } from '../lib/time'
 
 type Step = 'time' | 'details' | 'sent'
+
+/** 重寄之後暫時停用,與後端的最短間隔(60 秒)一致,免得使用者連按 */
+const RESEND_COOLDOWN_MS = 60_000
+
+function ResendButton({
+  slug,
+  bookingId,
+  email,
+}: {
+  slug: string
+  bookingId: string
+  email: string
+}) {
+  const [cooling, setCooling] = useState(false)
+  const resend = useMutation({
+    mutationFn: () => resendVerification(slug, bookingId, email),
+    onSuccess: () => {
+      setCooling(true)
+      setTimeout(() => setCooling(false), RESEND_COOLDOWN_MS)
+    },
+  })
+  return (
+    <div className="resend">
+      <button
+        type="button"
+        className="btn btn-secondary"
+        disabled={resend.isPending || cooling}
+        onClick={() => resend.mutate()}
+      >
+        {resend.isPending ? '寄送中…' : cooling ? '已重新寄出' : '沒收到?重新寄送確認信'}
+      </button>
+      {resend.isSuccess && <Notice tone="success">{resend.data.message}</Notice>}
+      {resend.isError && (
+        <Notice tone="error">
+          {resend.error instanceof ApiError ? resend.error.message : '寄送失敗,請再試一次。'}
+        </Notice>
+      )}
+    </div>
+  )
+}
 
 export function BookPage() {
   const { slug = '', serviceId = '' } = useParams()
@@ -190,8 +230,9 @@ export function BookPage() {
                 我們已寄出確認信到 <strong>{sent.email}</strong>。請在 <strong>24 小時內</strong>
                 開啟信中的連結,並按下「確認預約」。
               </p>
+              <ResendButton slug={slug} bookingId={sent.booking.id} email={sent.email} />
               <ul className="tips">
-                <li>沒收到的話,請看一下垃圾郵件匣。</li>
+                <li>沒收到的話,請先看一下垃圾郵件匣。</li>
                 <li>超過 24 小時沒確認,這筆申請會自動失效,需要重新預約。</li>
                 <li>確認前別人仍可能訂走同一個時段。</li>
               </ul>

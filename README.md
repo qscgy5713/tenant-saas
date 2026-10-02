@@ -62,6 +62,7 @@ curl 127.0.0.1:3001/health
 | GET | `/public/shops/{slug}/availability?service_id=&from=&to=&staff_id=` | 可預約時段(日期為店家本地日期,一次最多 14 天) |
 | POST | `/public/shops/{slug}/bookings` | 提出預約申請(狀態 `pending`,**不占時段**),系統寄確認信;回應不含 token |
 | POST | `/public/bookings/{token}/confirm` | 按下信中連結後確認,此刻才占位 |
+| POST | `/public/shops/{slug}/bookings/{id}/resend` | 沒收到確認信時重寄 `{email}`;換新 token(舊連結失效),最多 3 次、間隔 60 秒;**不論是否寄出都回同樣的 202** |
 | GET | `/public/bookings/{token}` | 查看預約(token 只寄到顧客信箱) |
 | GET | `/public/bookings/{token}/availability?from=&to=` | 這筆預約改期時可選的時段(同一位員工與服務,**排除預約自己**) |
 | POST | `/public/bookings/{token}/cancel`、`/reschedule` | 取消 / 改期 |

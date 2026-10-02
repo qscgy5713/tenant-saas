@@ -38,6 +38,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/public/shops/{slug}/availability", get(availability))
         .route("/public/shops/{slug}/bookings", post(create_booking))
+        .route(
+            "/public/shops/{slug}/bookings/{id}/resend",
+            post(resend_verification),
+        )
         .route("/public/bookings/{token}", get(get_booking))
         .route(
             "/public/bookings/{token}/availability",
@@ -325,6 +329,92 @@ async fn create_booking(
             message: "請到信箱按下確認連結,預約才會成立",
         }),
     ))
+}
+
+/// 重寄確認信的上限與最短間隔
+const MAX_RESENDS: i32 = 3;
+const MIN_RESEND_GAP_SECS: i64 = 60;
+
+#[derive(Debug, Deserialize)]
+struct ResendBody {
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Resent {
+    message: &'static str,
+}
+
+/// 沒收到確認信時重寄。顧客沒收到信就沒有 token,所以用「預約編號 + Email」確認身分。
+/// **不論有沒有真的寄出都回一樣的 202**(編號不對、Email 不符、已確認 / 已過期、超過次數或太頻繁),
+/// 不洩漏任何預約是否存在。重寄會換新的 token,舊信裡的連結隨即失效。
+async fn resend_verification(
+    State(state): State<AppState>,
+    Path((slug, id)): Path<(String, Uuid)>,
+    Json(req): Json<ResendBody>,
+) -> Result<(StatusCode, Json<Resent>), AppError> {
+    let reply = || {
+        (
+            StatusCode::ACCEPTED,
+            Json(Resent {
+                message: "如果資料正確,確認信已重新寄出。請查看信箱(包含垃圾郵件匣)。",
+            }),
+        )
+    };
+    let email = req.email.trim().to_lowercase();
+    let (mut tx, tenant_id, _) = open_shop(&state, &slug).await?;
+
+    let row: Option<(BookingStatus, DateTime<Utc>, i32, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT b.status, b.created_at, b.verification_resends, b.verification_sent_at
+         FROM bookings b JOIN customers c ON c.id = b.customer_id
+         WHERE b.id = $1 AND lower(c.email::text) = $2
+         FOR UPDATE OF b",
+    )
+    .bind(id)
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let now = Utc::now();
+    let Some((status, created_at, resends, sent_at)) = row else {
+        return Ok(reply());
+    };
+    let expired = created_at < now - Duration::hours(i64::from(PENDING_TTL_HOURS));
+    let too_soon = sent_at > now - Duration::seconds(MIN_RESEND_GAP_SECS);
+    if status != BookingStatus::Pending || expired || resends >= MAX_RESENDS || too_soon {
+        return Ok(reply());
+    }
+
+    let raw = token::generate();
+    sqlx::query(
+        "UPDATE bookings SET manage_token_hash = $2, verification_resends = verification_resends + 1,
+                verification_sent_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(token::hash(&raw))
+    .execute(&mut *tx)
+    .await?;
+
+    let ctx = booking::mail_ctx(&mut tx, id).await?;
+    let link = mail::booking_link(&state.public_base_url, &raw);
+    outbox::enqueue(
+        &mut tx,
+        tenant_id,
+        &mail::verification(&ctx.view(), &link),
+        Some(&format!("verify:{id}:{}", resends + 1)),
+    )
+    .await?;
+    audit::record(
+        &mut tx,
+        tenant_id,
+        Actor::Customer,
+        "booking.verification_resent",
+        "booking",
+        Some(id),
+        json!({ "count": resends + 1 }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(reply())
 }
 
 #[derive(Debug, Serialize, FromRow)]

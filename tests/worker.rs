@@ -905,3 +905,186 @@ async fn reminders_are_sent_again_after_moving_back_to_the_original_time(pool: P
         3
     );
 }
+
+// ---------- 重寄確認信 ----------
+
+async fn resend(s: &Shop, id: &str, email: &str) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/public/shops/shop-a/bookings/{id}/resend"),
+        Some(json!({"email": email})),
+        None,
+    )
+    .await
+}
+
+/// 讓「上次寄出」的時間往前推,模擬等過了最短間隔
+async fn age_last_send(pool: &PgPool) {
+    sqlx::query("UPDATE bookings SET verification_sent_at = now() - interval '2 minutes'")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn resending_issues_a_new_link_and_voids_the_old_one(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    tick(&pool, &mailer).await.unwrap();
+    let old = token_in(&memory.sent()[0].body);
+
+    age_last_send(&pool).await;
+    // Email 大小寫與前後空白不影響
+    let (status, _) = resend(&s, id, "  C@Example.com ").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    tick(&pool, &mailer).await.unwrap();
+    let mails = memory.sent();
+    assert_eq!(mails.len(), 2);
+    assert_eq!(mails[1].to, "c@example.com");
+    let new = token_in(&mails[1].body);
+    assert_ne!(new, old);
+
+    // 舊連結失效,新連結可以確認
+    assert_eq!(
+        call(
+            &s.app,
+            Method::GET,
+            &format!("/public/bookings/{old}"),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &s.app,
+            Method::POST,
+            &format!("/public/bookings/{new}/confirm"),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE action = 'booking.verification_resent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn resend_never_reveals_whether_a_booking_exists(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    tick(&pool, &mailer).await.unwrap();
+    age_last_send(&pool).await;
+
+    let real = resend(&s, id, "someone-else@example.com").await; // 編號對、Email 不符
+    let unknown = resend(&s, &uuid::Uuid::new_v4().to_string(), "c@example.com").await; // 編號不存在
+    assert_eq!(real.0, StatusCode::ACCEPTED);
+    assert_eq!(real, unknown, "回應必須一模一樣");
+    tick(&pool, &mailer).await.unwrap();
+    assert_eq!(
+        memory.sent().len(),
+        1,
+        "對不上的請求不能寄信,也不能換掉 token"
+    );
+
+    // 別家店的路徑也一樣(RLS 下看不到)
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/shops/no-such-shop/bookings/{id}/resend"),
+        Some(json!({"email": "c@example.com"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn resend_is_limited_in_count_and_frequency(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    // 剛寄出不到一分鐘:不重寄
+    resend(&s, id, "c@example.com").await;
+    tick(&pool, &mailer).await.unwrap();
+    assert_eq!(memory.sent().len(), 1, "只有最初的那封");
+
+    for _ in 0..6 {
+        age_last_send(&pool).await;
+        resend(&s, id, "c@example.com").await;
+    }
+    tick(&pool, &mailer).await.unwrap();
+    assert_eq!(memory.sent().len(), 1 + 3, "最多重寄 3 次");
+}
+
+#[sqlx::test]
+async fn resend_only_works_while_the_request_is_still_pending(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    tick(&pool, &mailer).await.unwrap();
+    let token = token_in(&memory.sent()[0].body);
+    age_last_send(&pool).await;
+
+    // 已過 24 小時
+    sqlx::query("UPDATE bookings SET created_at = now() - interval '25 hours'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    resend(&s, id, "c@example.com").await;
+    sqlx::query("UPDATE bookings SET created_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 已確認
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/confirm"),
+        None,
+        None,
+    )
+    .await;
+    resend(&s, id, "c@example.com").await;
+
+    tick(&pool, &mailer).await.unwrap();
+    let verifications = memory
+        .sent()
+        .iter()
+        .filter(|m| m.subject.contains("請確認"))
+        .count();
+    assert_eq!(
+        verifications, 1,
+        "過期或已確認的不再寄驗證信,也不會換掉管理連結"
+    );
+    assert_eq!(
+        call(
+            &s.app,
+            Method::GET,
+            &format!("/public/bookings/{token}"),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}

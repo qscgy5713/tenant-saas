@@ -41,6 +41,10 @@ export const getBookingAvailability = (token: string, from: string, to: string) 
 export const createBooking = (slug: string, body: NewBooking) =>
   api<BookingRequested>(`/public/shops/${enc(slug)}/bookings`, json(body))
 
+/** 沒收到確認信時重寄(用預約編號 + Email 確認身分)。不論資料是否正確都回一樣的訊息 */
+export const resendVerification = (slug: string, id: string, email: string) =>
+  api<{ message: string }>(`/public/shops/${enc(slug)}/bookings/${enc(id)}/resend`, json({ email }))
+
 export const getBooking = (token: string) => api<PublicBooking>(`/public/bookings/${enc(token)}`)
 
 export const confirmBooking = (token: string) =>

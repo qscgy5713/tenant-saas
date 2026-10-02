@@ -263,6 +263,70 @@ describe('送出預約申請', () => {
     expect(screen.getByText(/24 小時內/)).toBeInTheDocument()
   })
 
+  it('沒收到信:按「重新寄送」帶預約編號與 Email,顯示後端訊息並暫時停用按鈕', async () => {
+    mockShop()
+    let resent: unknown
+    server.use(
+      http.post(`${API}/public/shops/demo-salon/bookings`, () =>
+        HttpResponse.json(
+          {
+            id: 'b-42',
+            status: 'pending',
+            starts_at: taipei('2026-10-05', '10:30'),
+            ends_at: taipei('2026-10-05', '11:30'),
+            message: 'x',
+          },
+          { status: 201 },
+        ),
+      ),
+      http.post(`${API}/public/shops/demo-salon/bookings/b-42/resend`, async ({ request }) => {
+        resent = await request.json()
+        return HttpResponse.json({ message: '如果資料正確,確認信已重新寄出。' }, { status: 202 })
+      }),
+    )
+    renderApp(BOOK)
+    const user = userEvent.setup()
+    await toDetails(user)
+    await user.type(screen.getByLabelText(/姓名/), '王小明')
+    await user.type(screen.getByLabelText(/Email/), ' Ming@Example.com ')
+    await user.click(screen.getByRole('button', { name: '送出預約申請' }))
+
+    await user.click(await screen.findByRole('button', { name: '沒收到?重新寄送確認信' }))
+    expect(await screen.findByText('如果資料正確,確認信已重新寄出。')).toBeInTheDocument()
+    expect(resent).toEqual({ email: 'Ming@Example.com' })
+    expect(screen.getByRole('button', { name: '已重新寄出' })).toBeDisabled() // 避免連按
+  })
+
+  it('重寄被限流(429)→ 顯示原因', async () => {
+    mockShop()
+    server.use(
+      http.post(`${API}/public/shops/demo-salon/bookings`, () =>
+        HttpResponse.json(
+          {
+            id: 'b-42',
+            status: 'pending',
+            starts_at: taipei('2026-10-05', '10:30'),
+            ends_at: taipei('2026-10-05', '11:30'),
+            message: 'x',
+          },
+          { status: 201 },
+        ),
+      ),
+      http.post(`${API}/public/shops/demo-salon/bookings/b-42/resend`, () =>
+        error(429, '請求過於頻繁,請稍後再試'),
+      ),
+    )
+    renderApp(BOOK)
+    const user = userEvent.setup()
+    await toDetails(user)
+    await user.type(screen.getByLabelText(/姓名/), '王小明')
+    await user.type(screen.getByLabelText(/Email/), 'ming@example.com')
+    await user.click(screen.getByRole('button', { name: '送出預約申請' }))
+    await user.click(await screen.findByRole('button', { name: '沒收到?重新寄送確認信' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('請求過於頻繁')
+    expect(screen.getByRole('button', { name: '沒收到?重新寄送確認信' })).toBeEnabled()
+  })
+
   it('指定員工與電話 → 一併送出', async () => {
     mockShop({ staff: [STAFF_A, STAFF_B] })
     let body: { staff_id?: string; customer: { phone?: string } } | undefined
