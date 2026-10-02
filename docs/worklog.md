@@ -2,6 +2,26 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-02(前端:顧客預約頁)
+- 範圍:先做顧客端(後端公開 API 已齊全);店家後台留待下一階段
+- **先看真實產品再設計**(Cal.com、Square 的店家預約頁):採用橫向週列 + 沒空檔劃掉、「前往最近可預約日」空狀態、明確標示時區、固定的預約摘要
+- `web/`:React 19 + TypeScript + Vite + React Router + TanStack Query;`lib/time.ts` 處理店家時區與日曆日、`lib/slots.ts` 分組、`components/SlotPicker.tsx` 為核心
+- 後端小改:`GET /public/bookings/{token}` 補上 `shop_slug`、`service_id`、`staff_id`(改期要用,都不是機密)
+- 測試:前端 79 項(含 4 個突變驗證);後端維持 101 項;前端 CI 工作;本機等價執行每個步驟
+- **用真實後端 + Mailpit 在瀏覽器走完整流程**:選服務 → 選時間 → 驗證 → 送出 → 收信 → 開信中連結 → 確認 → 改期 → 取消;也用 iframe 看了 390px 手機版
+- 實際操作與 review 發現並修掉的問題:
+  1. 換到下一個兩週視窗時,`keepPreviousData` 會讓畫面用**上一個視窗的資料**判斷,閃出錯誤的「這一週沒有空檔」→ 拿掉
+  2. **載入中整排日期被當成「沒有空檔」**(劃掉、螢幕閱讀器唸「沒有空檔」)→ 載入中改為中性狀態,並用手動控制延遲的測試鎖住
+  3. `timeZoneName: 'short'` 在 zh-TW 下台北給 `GMT+8`、紐約卻給 `EST`,格式不一致 → 改 `shortOffset`
+  4. 深色模式的危險按鈕白字配淺鮭魚底,對比度 2.29 → 改為深色字 7.98(我先前的對比度檢查漏了這一組)
+  5. 管理頁的 `Date.now()` 在 render 中不純;頁面開著不動時,跨過預約開始時間按鈕也該消失 → `useNow`
+  6. 測試寫死完整日期字串,Node 與 Chrome 的 ICU 版本不同(有無空白)→ 改成容許空白
+- **要誠實說的**:
+  - 我曾把 nginx 驗證結果當成真的,但 `docker run` 其實因 8080 埠被佔用而失敗,curl 打到的是你機器上別的服務。看到錯誤訊息後全部作廢,換埠重做
+  - 瀏覽器視窗縮放有最小寬度,不能直接模擬手機;改用 iframe(iframe 內的 media query 依自己的寬度判斷)
+  - 沒有真的在手機上試過;沒有跑瀏覽器端的端對端自動化測試
+- 下一步:店家後台(登入、服務與營業時間設定、預約列表、成員、稽核、方案用量)
+
 ## 2026-10-02(M9 部署)
 - Dockerfile(172MB、非 root、健康檢查)、`.dockerignore`、CI 工作流程、`deploy/provision.sql`、`docs/deployment.md`
 - 子命令:`serve`(預設)、`migrate`、`healthcheck`;`migrate` 用 `MIGRATION_DATABASE_URL`

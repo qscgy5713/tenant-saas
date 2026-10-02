@@ -1,0 +1,49 @@
+import { useQuery } from '@tanstack/react-query'
+import { ApiError } from './client'
+import { getAvailability, getBooking, getServices, getShop, getStaff } from './public'
+
+/** 4xx 重試同樣的請求不會有不同結果,不要重試;網路 / 5xx 最多重試兩次 */
+export function shouldRetry(failureCount: number, error: unknown): boolean {
+  if (error instanceof ApiError && error.isClientError) return false
+  return failureCount < 2
+}
+
+const MINUTE = 60_000
+
+export const useShop = (slug: string) =>
+  useQuery({ queryKey: ['shop', slug], queryFn: () => getShop(slug), staleTime: 5 * MINUTE })
+
+export const useServices = (slug: string) =>
+  useQuery({ queryKey: ['services', slug], queryFn: () => getServices(slug), staleTime: MINUTE })
+
+export const useStaff = (slug: string, serviceId: string) =>
+  useQuery({
+    queryKey: ['staff', slug, serviceId],
+    queryFn: () => getStaff(slug, serviceId),
+    staleTime: MINUTE,
+  })
+
+export interface AvailabilityParams {
+  slug: string
+  serviceId: string
+  staffId: string | null
+  from: string
+  to: string
+}
+
+/** 可預約時段變動很快(別人隨時會訂走),所以快取很短 */
+export const useAvailability = (p: AvailabilityParams) =>
+  useQuery({
+    queryKey: ['availability', p.slug, p.serviceId, p.staffId, p.from, p.to],
+    queryFn: () =>
+      getAvailability(p.slug, {
+        serviceId: p.serviceId,
+        from: p.from,
+        to: p.to,
+        staffId: p.staffId ?? undefined,
+      }),
+    staleTime: 15_000,
+  })
+
+export const useBooking = (token: string) =>
+  useQuery({ queryKey: ['booking', token], queryFn: () => getBooking(token), staleTime: 0 })

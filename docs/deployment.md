@@ -122,6 +122,26 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 - 限流是**單一實例記憶體內**的:跑多個實例時各自計算,實際上限是「設定值 × 實例數」。要全域限流需改用 Redis。
 - 不要把 `/metrics` 開放到公網:即使有 token,也建議只讓內網的 Prometheus 抓取。
 
+## 前端
+
+`web/` 是 React 單頁應用程式,正式環境用 `web/Dockerfile`(nginx 提供靜態檔 + 把 `/api/` 轉給後端並去掉前綴):
+
+```bash
+docker build -t tenant-saas-web web
+docker run -d -p 80:80 -e API_UPSTREAM=http://app:3001 tenant-saas-web
+```
+
+後端對應設定:
+- `PUBLIC_BASE_URL` 設成**前端的公開網址**(信中的連結是 `${PUBLIC_BASE_URL}/bookings/{token}`)。
+- 後端在 nginx 後面時設 `TRUST_PROXY=true`,限流才會用真實的客戶端 IP(nginx 設定用 `$proxy_add_x_forwarded_for` 附加,後端取最右邊那筆)。
+- 前端與 API 在同一個網域(`/api/` 代理),所以不需要 CORS。
+
+nginx 設定(`web/nginx.conf.template`)刻意做的事,因為**預約管理頁的網址裡有 token**:
+- `Referrer-Policy: no-referrer`:瀏覽器不會把含 token 的網址當 Referer 送給別的網站
+- `/bookings/*` 加 `X-Robots-Tag: noindex` 與 `Cache-Control: no-store`
+- 嚴格的 CSP(只允許同源的腳本與樣式)、`frame-ancestors 'none'`(不能被嵌進別人的頁面)
+- 帶 hash 的 `/assets/` 永久快取;不存在的資產回 404(不被 SPA 的 fallback 吃掉)
+
 ## 監控
 
 ```yaml

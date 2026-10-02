@@ -285,8 +285,12 @@ struct PublicBooking {
     starts_at: DateTime<Utc>,
     ends_at: DateTime<Utc>,
     shop_name: String,
+    /// 店家網址代稱與服務 / 員工 id:前端改期時要用它們查可預約時段(都不是機密)
+    shop_slug: String,
     timezone: String,
+    service_id: Uuid,
     service_name: String,
+    staff_id: Uuid,
     staff_name: String,
     customer_name: String,
 }
@@ -294,8 +298,9 @@ struct PublicBooking {
 async fn load_by_token(tx: &mut Tx, raw: &str) -> Result<PublicBooking, AppError> {
     sqlx::query_as::<_, PublicBooking>(
         "SELECT b.id, b.status, b.starts_at, b.ends_at,
-                t.name AS shop_name, t.timezone,
-                s.name AS service_name, u.name AS staff_name, c.name AS customer_name
+                t.name AS shop_name, t.slug AS shop_slug, t.timezone,
+                b.service_id, s.name AS service_name,
+                b.staff_user_id AS staff_id, u.name AS staff_name, c.name AS customer_name
          FROM bookings b
          JOIN tenants t ON t.id = b.tenant_id
          JOIN services s ON s.id = b.service_id

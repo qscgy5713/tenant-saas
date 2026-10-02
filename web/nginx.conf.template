@@ -1,0 +1,47 @@
+# 前端靜態檔 + 把 /api/ 轉給後端(去掉 /api 前綴)。nginx 映像會用環境變數展開 ${...}。
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+
+    # 預約管理頁的網址裡有 token:不讓瀏覽器把它當 Referer 送給別的網站、不讓搜尋引擎索引、不要被嵌進別人的頁面
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    location /api/ {
+        # 結尾的斜線會把 /api/ 前綴去掉:/api/public/shops/x → /public/shops/x
+        proxy_pass ${API_UPSTREAM}/;
+        proxy_set_header Host $host;
+        # 後端設 TRUST_PROXY=true 時會取最右邊那一筆,也就是這裡附加的 $remote_addr,用戶端無法偽造
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-Id $request_id;
+        proxy_read_timeout 30s;
+    }
+
+    # 帶 hash 的建置產物可以永久快取
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        try_files $uri =404;
+    }
+
+    location /bookings/ {
+        add_header X-Robots-Tag "noindex, nofollow" always;
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        try_files /index.html =404;
+    }
+
+    # 單頁應用程式:其餘路徑都回 index.html,由前端路由處理
+    location / {
+        add_header Cache-Control "no-cache" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        try_files $uri /index.html;
+    }
+}

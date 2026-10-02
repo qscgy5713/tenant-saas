@@ -284,6 +284,10 @@ async fn book_then_cancel_frees_the_slot(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["status"], "confirmed");
     assert_eq!(view["service_name"], "剪髮");
+    // 前端改期需要:查可預約時段用的店家代稱、服務與員工 id
+    assert_eq!(view["shop_slug"], "shop-a");
+    assert_eq!(view["service_id"], s.service_id.as_str());
+    assert_eq!(view["staff_id"], s.owner_id.to_string());
     assert!(view.get("customer_email").is_none());
 
     // 取消後時段釋出,可再被預約;重複取消 409
