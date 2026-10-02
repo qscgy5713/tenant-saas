@@ -134,6 +134,23 @@ describe('預約管理頁(信中的連結)', () => {
     expect(rescheduled).toEqual({ start: taipei('2026-10-05', '10:30') })
   })
 
+  it('已確認且還沒開始 → 提供「加到行事曆」下載連結;待確認的沒有', async () => {
+    server.use(http.get(url(), () => HttpResponse.json(booking())))
+    const first = renderApp(PATH)
+    const link = await screen.findByRole('link', { name: '加到行事曆' })
+    expect(link).toHaveAttribute(
+      'href',
+      expect.stringMatching(/\/public\/bookings\/.+\/calendar\.ics$/),
+    )
+    expect(link).toHaveAttribute('download', 'booking.ics')
+    first.unmount()
+
+    server.use(http.get(url(), () => HttpResponse.json(booking({ status: 'pending' }))))
+    renderApp(PATH)
+    await screen.findByRole('button', { name: '確認預約' })
+    expect(screen.queryByRole('link', { name: '加到行事曆' })).not.toBeInTheDocument()
+  })
+
   it('預約時間已過 → 不提供改期 / 取消', async () => {
     server.use(
       http.get(url(), () =>

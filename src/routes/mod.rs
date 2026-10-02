@@ -2,6 +2,7 @@ mod audit_logs;
 mod auth;
 mod billing;
 mod bookings;
+mod customers;
 mod health;
 mod members;
 mod public;
@@ -139,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         .merge(services::routes())
         .merge(scheduling::routes())
         .merge(bookings::routes())
+        .merge(customers::routes())
         .merge(audit_logs::routes())
         .merge(billing::routes())
         .merge(public)

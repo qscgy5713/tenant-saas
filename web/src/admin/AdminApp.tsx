@@ -14,6 +14,8 @@ import { ShopsPage } from './pages/ShopsPage'
 import { TeamPage } from './pages/TeamPage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { ResetPasswordPage } from './pages/ResetPasswordPage'
+import { CustomersPage } from './pages/CustomersPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { ShopLayout } from './ShopLayout'
 import { useClearCacheOnLogout } from './useClearCacheOnLogout'
 
@@ -35,6 +37,14 @@ export default function AdminApp() {
           <Route path="team" element={<TeamPage />} />
           <Route path="team/:userId" element={<MemberPage />} />
           <Route
+            path="customers"
+            element={
+              <ManagerOnly>
+                <CustomersPage />
+              </ManagerOnly>
+            }
+          />
+          <Route
             path="audit"
             element={
               <ManagerOnly>
@@ -42,6 +52,7 @@ export default function AdminApp() {
               </ManagerOnly>
             }
           />
+          <Route path="settings" element={<SettingsPage />} />
           <Route
             path="plan"
             element={

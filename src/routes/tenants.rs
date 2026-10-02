@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -20,6 +20,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/tenants", post(create_tenant).get(list_tenants))
+        .route("/t/{slug}", patch(update_tenant))
         .route("/t/{slug}/me", get(tenant_me))
         .route("/t/{slug}/members", get(list_members))
         .route("/t/{slug}/plan", get(get_plan))
@@ -216,4 +217,54 @@ async fn list_plans(State(state): State<AppState>) -> Result<Json<Vec<plan::Plan
     .fetch_all(&state.db)
     .await?;
     Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTenantRequest {
+    name: Option<String>,
+    timezone: Option<String>,
+}
+
+/// 修改店家名稱 / 時區(僅店主)。網址代稱不可改:顧客手上的預約連結與書籤都靠它。
+async fn update_tenant(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Json(req): Json<UpdateTenantRequest>,
+) -> Result<Json<TenantMeResponse>, AppError> {
+    if ctx.role != Role::Owner {
+        return Err(AppError::Forbidden);
+    }
+    let name = req.name.map(|n| n.trim().to_string());
+    if name
+        .as_ref()
+        .is_some_and(|n| n.is_empty() || n.chars().count() > 100)
+    {
+        return Err(AppError::BadRequest("店家名稱長度需為 1–100 字".into()));
+    }
+    if req
+        .timezone
+        .as_ref()
+        .is_some_and(|tz| tz.parse::<chrono_tz::Tz>().is_err())
+    {
+        return Err(AppError::BadRequest("不支援的時區".into()));
+    }
+    if name.is_none() && req.timezone.is_none() {
+        return Err(AppError::BadRequest("沒有要修改的欄位".into()));
+    }
+
+    let mut tx = ctx.begin(&state).await?;
+    sqlx::query("SELECT update_tenant($1, $2)")
+        .bind(&name)
+        .bind(&req.timezone)
+        .execute(&mut *tx)
+        .await?;
+    let row = sqlx::query_as::<_, TenantMeResponse>(
+        "SELECT id, slug, name, timezone, $1::member_role AS role FROM tenants WHERE id = $2",
+    )
+    .bind(ctx.role)
+    .bind(ctx.tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(row))
 }

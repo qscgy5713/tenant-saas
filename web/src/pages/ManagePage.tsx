@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import {
   cancelBooking,
+  calendarUrl,
   confirmBooking,
   getBookingAvailability,
   rescheduleBooking,
@@ -160,13 +161,18 @@ export function ManagePage() {
         {changeable && mode === 'view' && (
           <div className="actions">
             {b.status === 'confirmed' && (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setMode('reschedule')}
-              >
-                改期
-              </button>
+              <>
+                <a className="btn btn-secondary" href={calendarUrl(token)} download="booking.ics">
+                  加到行事曆
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setMode('reschedule')}
+                >
+                  改期
+                </button>
+              </>
             )}
             <button
               type="button"

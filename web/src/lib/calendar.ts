@@ -112,3 +112,41 @@ export function weekDays(ymd: string): string[] {
   const monday = addDays(ymd, -((dow + 6) % 7))
   return Array.from({ length: 7 }, (_, i) => addDays(monday, i))
 }
+
+/** 該日所在月份的第一天 */
+export const monthStart = (ymd: string) => `${ymd.slice(0, 7)}-01`
+
+/** 往前 / 往後 n 個月,回傳那個月的第一天(不會有「31 號 + 1 個月」的問題) */
+export function addMonths(ymd: string, n: number): string {
+  const [y, m] = ymd.split('-').map(Number)
+  const index = y * 12 + (m - 1) + n
+  const year = Math.floor(index / 12)
+  const month = (index % 12) + 1
+  return `${year}-${String(month).padStart(2, '0')}-01`
+}
+
+/** 月曆格:週一開始,包含前後月份補滿的日子。每週七天,4–6 週 */
+export function monthWeeks(ymd: string): string[][] {
+  const first = monthStart(ymd)
+  const next = addMonths(first, 1)
+  const weeks: string[][] = []
+  let cursor = weekDays(first)[0]
+  while (cursor < next) {
+    weeks.push(Array.from({ length: 7 }, (_, i) => addDays(cursor, i)))
+    cursor = addDays(cursor, 7)
+  }
+  return weeks
+}
+
+/** 依店家當地日期分組(依開始時間),每組內依時間排序 */
+export function groupByLocalDay<T extends Span>(items: T[], tz: string): Map<string, T[]> {
+  const map = new Map<string, T[]>()
+  for (const item of items) {
+    const day = ymdInTz(item.starts_at, tz)
+    const list = map.get(day) ?? []
+    list.push(item)
+    map.set(day, list)
+  }
+  for (const list of map.values()) list.sort((a, b) => a.starts_at.localeCompare(b.starts_at))
+  return map
+}

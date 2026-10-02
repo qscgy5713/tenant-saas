@@ -8,6 +8,8 @@ import type {
   AuthResponse,
   Billing,
   BookingQuery,
+  Customer,
+  CustomerDetail,
   Invitation,
   Member,
   MyShop,
@@ -65,6 +67,10 @@ export const listShops = () => call<MyShop[]>('/tenants')
 
 export const createShop = (body: { slug: string; name: string; timezone: string }) =>
   call<MyShop>('/tenants', send('POST', body))
+
+/** 修改店名 / 時區(僅店主)。網址代稱不可改 */
+export const updateShop = (slug: string, body: { name?: string; timezone?: string }) =>
+  call<MyShop>(`/t/${enc(slug)}`, send('PATCH', body))
 
 export const getShop = (slug: string) => call<MyShop>(`/t/${enc(slug)}/me`)
 
@@ -194,6 +200,13 @@ export const listAudit = (
 
 export const getPlan = (slug: string) =>
   call<{ plan: PlanInfo; usage: PlanUsage }>(`/t/${enc(slug)}/plan`)
+
+// ---------- 顧客 ----------
+export const listCustomers = (slug: string, q: { q?: string; limit?: number; offset?: number }) =>
+  call<Page<Customer>>(`/t/${enc(slug)}/customers${query({ ...q })}`)
+
+export const getCustomer = (slug: string, id: string) =>
+  call<CustomerDetail>(`/t/${enc(slug)}/customers/${enc(id)}`)
 
 export const getBilling = (slug: string) => call<Billing>(`/t/${enc(slug)}/billing`)
 

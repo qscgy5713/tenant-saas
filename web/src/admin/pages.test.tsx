@@ -789,6 +789,251 @@ describe('接受邀請', () => {
   })
 })
 
+describe('月曆', () => {
+  beforeEach(() => mockShopMe('owner'))
+
+  const at = (
+    day: string,
+    hhmm: string,
+    id: string,
+    name: string,
+    over: Partial<AdminBooking> = {},
+  ) =>
+    booking({
+      id,
+      customer_name: name,
+      starts_at: taipei(day, hhmm),
+      ends_at: taipei(day, `${String(Number(hhmm.slice(0, 2)) + 1).padStart(2, '0')}:00`),
+      ...over,
+    })
+
+  it('整個月(含前後補滿的日子)的預約依日期放進格子;已取消不畫;一格最多 3 筆其餘「還有 N 筆」', async () => {
+    mockBookings([
+      at('2026-10-02', '10:00', 'a', '甲'),
+      at('2026-10-02', '11:00', 'b', '乙'),
+      at('2026-10-02', '13:00', 'c', '丙'),
+      at('2026-10-02', '15:00', 'd', '丁'),
+      at('2026-10-02', '16:00', 'x', '取消客', { status: 'cancelled' }),
+      at('2026-09-30', '09:00', 'e', '戊'), // 補在月初前面的日子
+    ])
+    renderApp('/admin/demo-salon/bookings?view=month&date=2026-10-15')
+    const cal = await screen.findByRole('region', { name: '月曆' })
+    expect(await within(cal).findByRole('button', { name: /甲/ })).toBeInTheDocument()
+    expect(within(cal).getByRole('button', { name: /丙/ })).toBeInTheDocument()
+    expect(within(cal).queryByRole('button', { name: /丁/ })).not.toBeInTheDocument() // 第 4 筆被收起來
+    expect(within(cal).getByRole('button', { name: '還有 1 筆' })).toBeInTheDocument()
+    expect(within(cal).getByRole('button', { name: /戊/ })).toBeInTheDocument()
+    expect(within(cal).queryByText(/取消客/)).not.toBeInTheDocument()
+    expect(cal.querySelectorAll('[style]')).toHaveLength(0)
+    expect(screen.getByRole('heading', { name: '2026年10月' })).toBeInTheDocument()
+  })
+
+  it('點預約開詳情;點日期或「還有 N 筆」回到當天的列表', async () => {
+    mockBookings([at('2026-10-06', '16:00', 'a', '甲客')])
+    renderApp('/admin/demo-salon/bookings?view=month&date=2026-10-15')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: /甲客/ }))
+    expect(within(await screen.findByRole('dialog')).getByText('甲客')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.click(screen.getByRole('button', { name: /^2026-10-06/ }))
+    expect(await screen.findByRole('heading', { name: /10月6日/ })).toBeInTheDocument()
+    expect(screen.getByLabelText('日期')).toHaveValue('2026-10-06')
+    expect(screen.queryByRole('region', { name: '月曆' })).not.toBeInTheDocument()
+  })
+
+  it('上個月 / 下個月:跨年也正確,並以該月第一天查詢範圍', async () => {
+    const ranges: { from: string | null; to: string | null }[] = []
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings`, ({ request }) => {
+        const p = new URL(request.url).searchParams
+        ranges.push({ from: p.get('from'), to: p.get('to') })
+        return HttpResponse.json({ items: [], limit: 100, offset: 0 })
+      }),
+    )
+    renderApp('/admin/demo-salon/bookings?view=month&date=2026-12-20')
+    const user = userEvent.setup()
+    expect(await screen.findByRole('heading', { name: '2026年12月' })).toBeInTheDocument()
+    // 2026/12 的月曆從 11/30(週一)到 2027/1/3(週日)
+    expect(ranges[0]).toEqual({
+      from: taipei('2026-11-30', '00:00'),
+      to: taipei('2027-01-04', '00:00'),
+    })
+
+    await user.click(screen.getByRole('button', { name: '下個月' }))
+    expect(await screen.findByRole('heading', { name: '2027年1月' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '上個月' }))
+    await user.click(screen.getByRole('button', { name: '上個月' }))
+    expect(await screen.findByRole('heading', { name: '2026年11月' })).toBeInTheDocument()
+  })
+})
+
+describe('顧客頁', () => {
+  const customer = (over: object = {}) => ({
+    id: 'c1',
+    name: '王小明',
+    email: 'ming@customer.example.com',
+    phone: '0912-345-678',
+    bookings: 3,
+    completed: 2,
+    no_shows: 1,
+    last_at: taipei('2026-09-20', '10:00'),
+    next_at: taipei('2026-10-12', '14:00'),
+    ...over,
+  })
+
+  it('員工看不到;管理者看到清單、未到標記與下次預約', async () => {
+    mockShopMe('staff')
+    renderApp('/admin/demo-salon/customers')
+    expect(await screen.findByRole('heading', { name: '沒有權限' })).toBeInTheDocument()
+  })
+
+  it('搜尋(停止輸入後才查)、載入更多、點名字看預約紀錄', async () => {
+    mockShopMe('manager')
+    const queries: { q: string | null; offset: string | null }[] = []
+    const many = Array.from({ length: 30 }, (_, i) => customer({ id: `c${i}`, name: `顧客${i}` }))
+    server.use(
+      http.get(`${API}/t/demo-salon/customers`, ({ request }) => {
+        const p = new URL(request.url).searchParams
+        queries.push({ q: p.get('q'), offset: p.get('offset') })
+        const offset = Number(p.get('offset') ?? 0)
+        if (p.get('q') === '小明')
+          return HttpResponse.json({ items: [customer()], limit: 30, offset })
+        return HttpResponse.json({
+          items: offset === 0 ? many : [customer({ id: 'last', name: '最後一位' })],
+          limit: 30,
+          offset,
+        })
+      }),
+      http.get(`${API}/t/demo-salon/customers/c1`, () =>
+        HttpResponse.json({
+          ...customer(),
+          history: [
+            {
+              id: 'h1',
+              status: 'completed',
+              starts_at: taipei('2026-09-20', '10:00'),
+              ends_at: taipei('2026-09-20', '11:00'),
+              notes: '怕癢',
+              service_name: '剪髮',
+              staff_name: '林美玲',
+            },
+            {
+              id: 'h2',
+              status: 'no_show',
+              starts_at: taipei('2026-08-01', '10:00'),
+              ends_at: taipei('2026-08-01', '11:00'),
+              notes: null,
+              service_name: '染髮',
+              staff_name: '林美玲',
+            },
+          ],
+        }),
+      ),
+    )
+    renderApp('/admin/demo-salon/customers')
+    const user = userEvent.setup()
+    expect(await screen.findByText('顧客0')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '載入更多' }))
+    expect(await screen.findByText('最後一位')).toBeInTheDocument()
+    expect(queries.map((x) => x.offset)).toEqual(['0', '30'])
+
+    // 一個字一個字輸入只會查最後的結果(防抖)
+    await user.type(screen.getByLabelText('搜尋顧客'), '小明')
+    await waitFor(() => expect(queries.at(-1)?.q).toBe('小明'))
+    expect(queries.filter((x) => x.q).map((x) => x.q)).toEqual(['小明'])
+    await waitFor(() => expect(screen.queryByText('顧客0')).not.toBeInTheDocument())
+
+    expect(screen.getByText('未到 1')).toBeInTheDocument()
+    expect(screen.getByText('共 3 次預約')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '王小明' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText('染髮')).toBeInTheDocument()
+    expect(within(dialog).getByText('備註:怕癢')).toBeInTheDocument()
+    expect(within(dialog).getByText('未到')).toBeInTheDocument()
+  })
+
+  it('沒有顧客 / 搜尋沒結果 → 不同的說明', async () => {
+    mockShopMe('owner')
+    server.use(
+      http.get(`${API}/t/demo-salon/customers`, () =>
+        HttpResponse.json({ items: [], limit: 30, offset: 0 }),
+      ),
+    )
+    renderApp('/admin/demo-salon/customers')
+    const user = userEvent.setup()
+    expect(await screen.findByText(/還沒有顧客/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('搜尋顧客'), 'zzz')
+    expect(await screen.findByText('沒有符合的顧客。')).toBeInTheDocument()
+  })
+})
+
+describe('店家設定', () => {
+  it('只有店主看得到「設定」;管理者直接開網址會看到沒有權限', async () => {
+    mockShopMe('manager')
+    renderApp('/admin/demo-salon/settings')
+    expect(await screen.findByRole('heading', { name: '沒有權限' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '設定' })).not.toBeInTheDocument()
+  })
+
+  it('只送出有改的欄位;改時區時警告營業時間會改用新時區解讀;儲存後提示', async () => {
+    mockShopMe('owner')
+    const s = spy<{ name?: string; timezone?: string }>()
+    let current = SHOP('owner')
+    server.use(
+      http.get(`${API}/t/demo-salon/me`, () => HttpResponse.json(current)),
+      http.patch(`${API}/t/demo-salon`, async ({ request }) => {
+        const body = (await request.clone().json()) as { name?: string; timezone?: string }
+        await s.record(request)
+        current = { ...current, ...body }
+        return HttpResponse.json(current)
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    const name = await screen.findByLabelText('店家名稱')
+    const save = screen.getByRole('button', { name: '儲存' })
+    expect(save).toBeDisabled() // 沒改任何東西
+    expect(screen.queryByText(/不會移動/)).not.toBeInTheDocument()
+
+    await user.clear(name)
+    await user.type(name, '  新名字 ')
+    await user.click(save)
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({ name: '新名字' }) // 時區沒改就不送
+    expect(await screen.findByText('已儲存。')).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('店家所在時區'), 'Asia/Tokyo')
+    expect(screen.getByText(/不會移動/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '儲存' }))
+    await waitFor(() => expect(s.calls).toHaveLength(2))
+    expect(s.calls[1].body).toEqual({ timezone: 'Asia/Tokyo' })
+  })
+
+  it('名稱空白 → 前端擋下;後端錯誤顯示原因', async () => {
+    mockShopMe('owner')
+    const s = spy()
+    server.use(
+      http.patch(`${API}/t/demo-salon`, async ({ request }) => {
+        await s.record(request)
+        return error(400, '不支援的時區')
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    const name = await screen.findByLabelText('店家名稱')
+    await user.clear(name)
+    await user.click(screen.getByRole('button', { name: '儲存' }))
+    expect(await screen.findByText(/店家名稱/, { selector: '.field-msg' })).toBeInTheDocument()
+    expect(s.calls).toHaveLength(0)
+
+    await user.type(name, '森林系髮廊2')
+    await user.click(screen.getByRole('button', { name: '儲存' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('不支援的時區')
+  })
+})
+
 describe('線上付款(Stripe)', () => {
   const FREE = {
     id: 'free',

@@ -135,7 +135,10 @@ function CreateShopModal({ open, onClose }: { open: boolean; onClose: () => void
             aria-invalid={!!errors.slug}
           />
         </TextField>
-        <TextField label="店家所在時區" hint="營業時間與預約時段都以這個時區為準,建立後無法更改">
+        <TextField
+          label="店家所在時區"
+          hint="營業時間與預約時段都以這個時區為準,之後可在店家的「設定」修改"
+        >
           <select
             name="timezone"
             value={values.timezone}

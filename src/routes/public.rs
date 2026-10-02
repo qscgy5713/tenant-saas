@@ -7,7 +7,8 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::IntoResponse,
     routing::{get, post},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -25,7 +26,7 @@ use crate::{
     booking::{self, BookingStatus, NewBooking, PENDING_TTL_HOURS},
     db::{PG_EXCLUSION_VIOLATION, Tx, begin_scoped, pg_code, set_tenant},
     error::AppError,
-    mail, outbox, plan, token,
+    ical, mail, outbox, plan, token,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -43,6 +44,7 @@ pub fn routes() -> Router<AppState> {
             post(resend_verification),
         )
         .route("/public/bookings/{token}", get(get_booking))
+        .route("/public/bookings/{token}/calendar.ics", get(booking_ics))
         .route(
             "/public/bookings/{token}/availability",
             get(booking_availability),
@@ -461,6 +463,69 @@ async fn get_booking(
     let view = load_by_token(&mut tx, &raw).await?;
     tx.rollback().await?;
     Ok(Json(view))
+}
+
+#[derive(FromRow)]
+struct IcsRow {
+    id: Uuid,
+    status: BookingStatus,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    sequence: i32,
+    shop: String,
+    service: String,
+    staff: String,
+}
+
+/// 下載 .ics,把已確認的預約加進自己的行事曆。UID 固定、SEQUENCE 隨改期遞增,
+/// 所以改期後重新下載會「更新」行事曆裡的同一個事件,不會多出一筆。
+async fn booking_ics(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let (mut tx, _, _) = open_by_token(&state, &raw).await?;
+    let row = sqlx::query_as::<_, IcsRow>(
+        "SELECT b.id, b.status, b.starts_at, b.ends_at, b.reminder_seq AS sequence,
+                t.name AS shop, s.name AS service, u.name AS staff
+         FROM bookings b
+         JOIN tenants t ON t.id = b.tenant_id
+         JOIN services s ON s.id = b.service_id
+         JOIN users u ON u.id = b.staff_user_id
+         WHERE b.manage_token_hash = $1",
+    )
+    .bind(token::hash(&raw))
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    let row = row.ok_or(AppError::NotFound)?;
+    if row.status != BookingStatus::Confirmed {
+        return Err(AppError::Conflict("只有已確認的預約可以加入行事曆".into()));
+    }
+    let body = ical::calendar(
+        &ical::Event {
+            uid: &format!("booking-{}@tenant-saas", row.id),
+            sequence: row.sequence,
+            starts_at: row.starts_at,
+            ends_at: row.ends_at,
+            summary: &format!("{} - {}", row.service, row.shop),
+            description: &format!(
+                "店家:{}\n服務:{}\n人員:{}",
+                row.shop, row.service, row.staff
+            ),
+        },
+        Utc::now(),
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/calendar; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"booking.ics\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    ))
 }
 
 #[derive(FromRow)]

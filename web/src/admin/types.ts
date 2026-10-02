@@ -127,6 +127,33 @@ export interface Billing {
   can_manage: boolean
 }
 
+export interface Customer {
+  id: string
+  name: string
+  email: string
+  phone: string | null
+  /** 已確認 + 已完成 + 未到 */
+  bookings: number
+  completed: number
+  no_shows: number
+  last_at: string | null
+  next_at: string | null
+}
+
+export interface CustomerHistoryItem {
+  id: string
+  status: BookingStatus
+  starts_at: string
+  ends_at: string
+  notes: string | null
+  service_name: string
+  staff_name: string
+}
+
+export interface CustomerDetail extends Customer {
+  history: CustomerHistoryItem[]
+}
+
 export interface PlanInfo {
   id: string
   name: string

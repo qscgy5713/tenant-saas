@@ -5,6 +5,8 @@ import { ApiError } from '../api/client'
 import { Avatar } from '../components/Avatar'
 import {
   CardIcon,
+  UserIcon,
+  SettingsIcon,
   ExternalLinkIcon,
   HomeIcon,
   ListIcon,
@@ -27,6 +29,8 @@ interface NavItem {
   icon: React.ReactNode
   /** 只有 owner / manager 看得到(後端本來就會擋,這裡只是不顯示用不到的入口) */
   managerOnly?: boolean
+  /** 只有店主看得到 */
+  ownerOnly?: boolean
   end?: boolean
 }
 
@@ -35,8 +39,10 @@ const NAV: NavItem[] = [
   { to: 'bookings', label: '預約', icon: <ListIcon /> },
   { to: 'services', label: '服務', icon: <TagIcon /> },
   { to: 'team', label: '團隊', icon: <UsersIcon /> },
+  { to: 'customers', label: '顧客', icon: <UserIcon />, managerOnly: true },
   { to: 'audit', label: '稽核', icon: <ShieldIcon />, managerOnly: true },
   { to: 'plan', label: '方案', icon: <CardIcon />, managerOnly: true },
+  { to: 'settings', label: '設定', icon: <SettingsIcon />, ownerOnly: true },
 ]
 
 export function ShopLayout() {
@@ -85,7 +91,9 @@ export function ShopLayout() {
     )
   }
 
-  const items = NAV.filter((item) => !item.managerOnly || ctx.canManage)
+  const items = NAV.filter(
+    (item) => (!item.managerOnly || ctx.canManage) && (!item.ownerOnly || ctx.isOwner),
+  )
 
   return (
     <ShopContext.Provider value={ctx}>

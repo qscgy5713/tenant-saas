@@ -36,6 +36,9 @@ curl 127.0.0.1:3001/health
 | GET | `/auth/me` | 目前使用者 |
 | POST / GET | `/tenants` | 建立店家 / 列出我所屬的店家 |
 | GET | `/t/{slug}/me` | 我在該店的角色 |
+| PATCH | `/t/{slug}` | 修改店名 / 時區 `{name?, timezone?}`(僅店主;代稱與方案不可改) |
+| GET | `/t/{slug}/customers?q=&limit=&offset=` | 顧客清單與預約統計(管理者以上;只列有已確認預約的顧客) |
+| GET | `/t/{slug}/customers/{id}` | 單一顧客與預約紀錄 |
 | GET | `/t/{slug}/members` | 該店成員 |
 | GET | `/t/{slug}/plan` | 目前方案與用量(manager 以上) |
 | GET | `/plans` | 公開的方案列表 |
@@ -64,6 +67,7 @@ curl 127.0.0.1:3001/health
 | POST | `/public/bookings/{token}/confirm` | 按下信中連結後確認,此刻才占位 |
 | POST | `/public/shops/{slug}/bookings/{id}/resend` | 沒收到確認信時重寄 `{email}`;換新 token(舊連結失效),最多 3 次、間隔 60 秒;**不論是否寄出都回同樣的 202** |
 | GET | `/public/bookings/{token}` | 查看預約(token 只寄到顧客信箱) |
+| GET | `/public/bookings/{token}/calendar.ics` | 下載 .ics(僅已確認的預約;UID 固定、SEQUENCE 隨改期遞增) |
 | GET | `/public/bookings/{token}/availability?from=&to=` | 這筆預約改期時可選的時段(同一位員工與服務,**排除預約自己**) |
 | POST | `/public/bookings/{token}/cancel`、`/reschedule` | 取消 / 改期 |
 

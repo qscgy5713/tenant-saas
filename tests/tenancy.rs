@@ -1,8 +1,8 @@
 mod common;
 
 use axum::http::{Method, StatusCode};
-use common::{app, call, create_tenant, signup};
-use serde_json::json;
+use common::{add_member, app, call, create_tenant, signup};
+use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tenant_saas::db::begin_scoped;
 use uuid::Uuid;
@@ -397,4 +397,141 @@ async fn one_user_can_belong_to_several_tenants(pool: PgPool) {
             .0,
         StatusCode::NOT_FOUND
     );
+}
+
+// ---------- 修改店家名稱 / 時區 ----------
+
+#[sqlx::test]
+async fn only_the_owner_can_rename_the_shop_or_change_its_timezone(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "owner@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    let manager = signup(&app, "m@example.com").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+
+    let patch = |token: &str, body: Value| {
+        let (app, token) = (app.clone(), token.to_string());
+        async move { call(&app, Method::PATCH, "/t/shop-a", Some(body), Some(&token)).await }
+    };
+
+    let (status, body) = patch(
+        &owner,
+        json!({"name": "  新店名  ", "timezone": "Asia/Tokyo"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (
+            body["name"].as_str(),
+            body["timezone"].as_str(),
+            body["slug"].as_str()
+        ),
+        (Some("新店名"), Some("Asia/Tokyo"), Some("shop-a"))
+    );
+
+    // 只改其中一個欄位,另一個保持
+    let (_, body) = patch(&owner, json!({"name": "再改一次"})).await;
+    assert_eq!(
+        (body["name"].as_str(), body["timezone"].as_str()),
+        (Some("再改一次"), Some("Asia/Tokyo"))
+    );
+
+    // 管理者不行,資料不變
+    assert_eq!(
+        patch(&manager, json!({"name": "駭客"})).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let name: String = sqlx::query_scalar("SELECT name FROM tenants WHERE slug = 'shop-a'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(name, "再改一次");
+
+    // 驗證
+    for bad in [
+        json!({}),
+        json!({"name": "   "}),
+        json!({"name": "x".repeat(101)}),
+        json!({"timezone": "Mars/Base"}),
+        json!({"timezone": ""}),
+    ] {
+        assert_eq!(
+            patch(&owner, bad.clone()).await.0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    // 網址代稱與方案不能經由這個端點改(多餘的欄位被忽略)
+    patch(
+        &owner,
+        json!({"name": "店", "slug": "hacked", "plan_id": "business"}),
+    )
+    .await;
+    let (slug, plan): (String, String) = sqlx::query_as("SELECT slug, plan_id FROM tenants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((slug.as_str(), plan.as_str()), ("shop-a", "free"));
+
+    // 未登入
+    assert_eq!(
+        call(
+            &app,
+            Method::PATCH,
+            "/t/shop-a",
+            Some(json!({"name": "x"})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn changing_the_timezone_is_audited_and_visible_to_customers(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "owner@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    call(
+        &app,
+        Method::PATCH,
+        "/t/shop-a",
+        Some(json!({"timezone": "America/New_York"})),
+        Some(&owner),
+    )
+    .await;
+    call(
+        &app,
+        Method::PATCH,
+        "/t/shop-a",
+        Some(json!({"name": "只改名"})),
+        Some(&owner),
+    )
+    .await;
+
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT detail FROM audit_logs WHERE action = 'tenant.updated' ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (
+            rows[0]["timezone_from"].as_str(),
+            rows[0]["timezone_to"].as_str()
+        ),
+        (Some("Asia/Taipei"), Some("America/New_York"))
+    );
+    assert_eq!(rows[0]["name_changed"], json!(false), "第一次沒改名");
+    assert_eq!(rows[1]["name_changed"], json!(true));
+    assert!(
+        rows[1].get("timezone_to").is_none(),
+        "沒改時區就不記錄時區: {}",
+        rows[1]
+    );
+
+    let (_, shop) = call(&app, Method::GET, "/public/shops/shop-a", None, None).await;
+    assert_eq!(shop["timezone"], "America/New_York");
 }

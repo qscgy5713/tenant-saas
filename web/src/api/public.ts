@@ -1,4 +1,4 @@
-import { api, json } from './client'
+import { api, apiUrl, json } from './client'
 import type {
   Availability,
   BookingRequested,
@@ -44,6 +44,9 @@ export const createBooking = (slug: string, body: NewBooking) =>
 /** 沒收到確認信時重寄(用預約編號 + Email 確認身分)。不論資料是否正確都回一樣的訊息 */
 export const resendVerification = (slug: string, id: string, email: string) =>
   api<{ message: string }>(`/public/shops/${enc(slug)}/bookings/${enc(id)}/resend`, json({ email }))
+
+/** 把已確認的預約加進行事曆的 .ics 下載連結 */
+export const calendarUrl = (token: string) => apiUrl(`/public/bookings/${enc(token)}/calendar.ics`)
 
 export const getBooking = (token: string) => api<PublicBooking>(`/public/bookings/${enc(token)}`)
 

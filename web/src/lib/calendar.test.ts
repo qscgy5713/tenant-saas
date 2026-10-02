@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { hourWindow, layoutDay, minutesWithin, weekDays } from './calendar'
+import {
+  addMonths,
+  groupByLocalDay,
+  hourWindow,
+  layoutDay,
+  minutesWithin,
+  monthStart,
+  monthWeeks,
+  weekDays,
+} from './calendar'
 
 const TZ = 'Asia/Taipei'
 const span = (day: string, from: string, to: string, id = `${day}${from}`) => ({
@@ -137,5 +146,55 @@ describe('layoutDay', () => {
 
   it('只包含屬於這一天的', () => {
     expect(layoutDay([span('2026-10-06', '10:00', '11:00')], d, TZ, 9)).toEqual([])
+  })
+})
+
+describe('addMonths / monthStart', () => {
+  it('回傳目標月份的第一天,跨年、31 號都正確', () => {
+    expect(monthStart('2026-10-17')).toBe('2026-10-01')
+    expect(addMonths('2026-01-31', 1)).toBe('2026-02-01')
+    expect(addMonths('2026-12-15', 1)).toBe('2027-01-01')
+    expect(addMonths('2026-01-15', -1)).toBe('2025-12-01')
+    expect(addMonths('2026-10-01', -13)).toBe('2025-09-01')
+    expect(addMonths('2026-10-01', 0)).toBe('2026-10-01')
+  })
+})
+
+describe('monthWeeks', () => {
+  it('週一開始、每週七天、涵蓋整個月', () => {
+    const weeks = monthWeeks('2026-10-17') // 10/1 是週四、10/31 是週六
+    expect(weeks[0][0]).toBe('2026-09-28')
+    expect(weeks[0][3]).toBe('2026-10-01')
+    expect(weeks.at(-1)![6]).toBe('2026-11-01')
+    expect(weeks).toHaveLength(5)
+    expect(weeks.every((w) => w.length === 7)).toBe(true)
+    // 連續、沒有缺日
+    const flat = weeks.flat()
+    expect(flat.slice(1).every((d, i) => d > flat[i])).toBe(true)
+  })
+
+  it('剛好 4 週(2026 年 2 月從週日以外的週一開始…)與 6 週的情況', () => {
+    expect(monthWeeks('2027-02-10')).toHaveLength(4) // 2027/2/1 是週一、共 28 天
+    expect(monthWeeks('2026-08-10')).toHaveLength(6) // 8/1 是週六、8/31 是週一
+  })
+})
+
+describe('groupByLocalDay', () => {
+  it('依店家時區分組:台北凌晨 00:30 是當天,不是前一天 UTC', () => {
+    const items = [
+      span('2026-10-05', '23:30', '23:45', 'late'),
+      span('2026-10-05', '00:30', '01:00', 'early'),
+      span('2026-10-06', '09:00', '10:00', 'next'),
+    ]
+    // 真實 API 回的是 UTC(Z 結尾):台北 10/5 00:30 其實是 UTC 10/4 16:30
+    const utc = items.map((i) => ({
+      ...i,
+      starts_at: new Date(i.starts_at).toISOString(),
+      ends_at: new Date(i.ends_at).toISOString(),
+    }))
+    expect(utc[1].starts_at.startsWith('2026-10-04')).toBe(true)
+    const map = groupByLocalDay(utc, TZ)
+    expect([...map.keys()].sort()).toEqual(['2026-10-05', '2026-10-06'])
+    expect(map.get('2026-10-05')!.map((x) => x.id)).toEqual(['early', 'late'])
   })
 })

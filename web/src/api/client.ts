@@ -18,6 +18,9 @@ export class ApiError extends Error {
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? '/api'
 
+/** 給 <a href> 用的完整 API 路徑(下載檔案等不經 fetch 的情況) */
+export const apiUrl = (path: string) => `${BASE}${path}`
+
 const NETWORK_MESSAGE = '無法連線到伺服器,請檢查網路後再試一次。'
 const SERVER_MESSAGE = '伺服器發生問題,請稍後再試。'
 

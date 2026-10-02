@@ -531,6 +531,7 @@
 }
 
 .date-nav input[type='date'],
+.toolbar input[type='search'],
 .toolbar select,
 .row-actions select {
   min-height: 40px;
@@ -1858,4 +1859,88 @@
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.customer-stats {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(6.5rem, 1fr));
+  min-width: 46rem;
+}
+.month-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 6.5rem;
+  padding: 0.25rem;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+.month-cell-out {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.month-cell-today {
+  background: var(--accent-soft);
+}
+.month-day {
+  align-self: flex-start;
+  min-width: 1.75rem;
+  padding: 0.125rem 0.375rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.month-day:hover,
+.month-day:focus-visible {
+  background: var(--accent-soft);
+  outline: 2px solid var(--accent);
+}
+.month-cell-today .month-day {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.month-chip {
+  overflow: hidden;
+  padding: 0.0625rem 0.375rem;
+  border: 1px solid var(--accent-strong);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.month-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.6875rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.toolbar input[type='search'] {
+  flex: 1 1 16rem;
+  max-width: 24rem;
+}
+.toolbar input[type='search']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
