@@ -775,3 +775,41 @@ async fn one_failing_stage_does_not_stop_mail_delivery(pool: PgPool) {
     assert_eq!(stats.sent, 1, "提醒出錯,但待寄的信照樣寄出");
     assert_eq!(memory.sent().len(), 1);
 }
+
+/// Log 模式會把含一次性連結的信件內容印進日誌,只能用在開發;正式環境沒設 SMTP 就必須拒絕
+#[test]
+fn production_refuses_to_log_emails_instead_of_sending_them() {
+    use tenant_saas::config::Config;
+    let base = common::test_config(3600);
+
+    let dev = Config {
+        production: false,
+        smtp_url: None,
+        ..base.clone()
+    };
+    assert!(
+        matches!(Mailer::from_config(&dev), Ok(Mailer::Log)),
+        "開發環境沒設 SMTP 可以用 Log 模式"
+    );
+
+    let prod = Config {
+        production: true,
+        smtp_url: None,
+        ..base.clone()
+    };
+    let err = Mailer::from_config(&prod)
+        .err()
+        .expect("正式環境必須拒絕")
+        .to_string();
+    assert!(err.contains("SMTP_URL"), "{err}");
+
+    let prod_smtp = Config {
+        production: true,
+        smtp_url: Some("smtp://127.0.0.1:1025".into()),
+        ..base
+    };
+    assert!(matches!(
+        Mailer::from_config(&prod_smtp),
+        Ok(Mailer::Smtp { .. })
+    ));
+}

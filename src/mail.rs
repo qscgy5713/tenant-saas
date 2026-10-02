@@ -59,6 +59,14 @@ pub enum Mailer {
 impl Mailer {
     pub fn from_config(config: &Config) -> Result<Self> {
         let Some(url) = &config.smtp_url else {
+            // Log 模式會把信件內容(含一次性連結)印進日誌,只能給開發用。
+            // 正式環境沒有寄信設定就不該啟動,否則取得日誌的人就能取消 / 改期任何顧客的預約。
+            if config.production {
+                anyhow::bail!(
+                    "APP_ENV=production 必須設定 SMTP_URL(未設定時信件會被印進日誌,內含一次性連結)。\
+                     若暫時不需要寄信,請設定 WORKER_ENABLED=false"
+                );
+            }
             tracing::warn!(
                 "未設定 SMTP_URL:信件(含連結)只會印在日誌,不會真的寄出。正式環境請設定 SMTP_URL"
             );

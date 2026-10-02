@@ -74,7 +74,7 @@
 - [ ] 取消預約通知信(顧客與員工)
 - [ ] 寄信量限制(同一收件者每小時上限),目前只靠「單一 Email 最多 5 筆未來預約」與 IP 限流
 - [ ] 提醒信帶管理連結(目前資料庫只存雜湊,提醒信沒有連結)
-- [ ] 監控:outbox 堆積、failed 數量
+- [x] 監控:outbox 堆積、failed 數量(M8 的 `/metrics`)
 
 ## M7 計費與限額
 - [x] 訂閱方案資料表:`plans`(free / pro / business),店家 `plan_id` 預設 free;店家自己沒有任何寫入權限
@@ -89,11 +89,29 @@
 - [ ] 營運人員後台(平台超級管理員)用來改方案
 
 ## M8 稽核與可觀測性
-- [ ] 稽核日誌
-- [ ] 結構化日誌與 request id
-- [ ] metrics
+- [x] 稽核日誌:與變更同一交易寫入;資料庫只給新增與讀取(沒有 UPDATE / DELETE);detail 不含 Email、電話、token、休假原因
+- [x] 稽核查詢 API:`GET /t/{slug}/audit-logs`(manager 以上),可依動作前綴 / 實體 / 操作者 / 時間篩選,游標翻頁
+- [x] 結構化日誌:`LOG_FORMAT=json`,每筆請求日誌帶請求 ID 與路由樣板
+- [x] 請求 ID:沿用合法的 `X-Request-Id`,否則產生;回應一律帶回
+- [x] metrics:`GET /metrics`(Prometheus,需 `METRICS_TOKEN`,未設定則端點不存在)——請求數、延遲、寄信與 worker 計數、outbox 堆積
+- [x] 日誌與指標只記路由樣板,不記實際網址(網址裡有顧客的預約管理 token)
+- [ ] 稽核日誌保留期限與歸檔(目前永久保留,量大時需分區或歸檔)
+- [ ] 稽核日誌匯出(CSV)
+- [ ] 沒有被記錄的事件:登入 / 登出 / 註冊、授權失敗(403)、讀取行為
+- [ ] 告警規則範例(outbox 積壓、5xx 比例、延遲 P99)
+- [ ] 分散式追蹤(OpenTelemetry)
+- [ ] `slot_taken` 這條稽核路徑(兩個確認「真正同時」發生)尚無確定性測試
 
 ## M9 部署
-- [ ] Dockerfile
-- [ ] CI(fmt、clippy、test)
-- [ ] 部署文件
+- [x] Dockerfile:多階段、依賴層快取、非 root(uid 10001)、內建 `HEALTHCHECK`(`tenant-saas healthcheck`)
+- [x] 子命令 `serve` / `migrate` / `healthcheck`;migration 用獨立的 migrator 帳號
+- [x] 受限的資料庫帳號:`tenant_runtime`(NOINHERIT,碰不到租戶資料表);啟動時檢查,`APP_ENV=production` 帳號過大就拒絕啟動
+- [x] CI(`.github/workflows/ci.yml`):fmt、clippy、測試;**受限帳號**的獨立工作(全新叢集 → 佈建 → migrate → 撤銷成員資格 → 跑完整流程);Docker 建置
+- [x] 部署文件 `docs/deployment.md`(角色、步驟、環境變數、反向代理、監控、備份、上線前檢查表)
+- [x] 註冊 / 登入限流(防暴力破解)
+- [x] production 沒設 `SMTP_URL` 就拒絕啟動(Log 模式會把一次性連結印進日誌)
+- [ ] **CI 尚未在 GitHub 上實際執行過**(只驗證了 YAML 語法,並在本機以相同順序重現每個步驟)
+- [ ] 正式環境的 TLS 連線資料庫(`sslmode=require`)尚未實測
+- [ ] 映像漏洞掃描、SBOM、簽章
+- [ ] docker-compose 的正式環境範例(目前只有文件步驟,沒有可直接執行的 compose)
+- [ ] 其他尚未做的上線前項目見 `docs/deployment.md` 檢查表(Stripe、忘記密碼、帳號鎖定、歸檔、前端…)

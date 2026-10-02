@@ -7,9 +7,11 @@
 - [todo.md](docs/todo.md):待辦清單
 - [worklog.md](docs/worklog.md):工作日誌
 - [decisions.md](docs/decisions.md):設計決策紀錄
+- [schema.md](docs/schema.md):資料表與 RLS 設計
+- [deployment.md](docs/deployment.md):**部署指南**(資料庫角色、步驟、環境變數、監控、上線前檢查表)
 
 ## 狀態
-M1–M7 完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額),下一步 M8 稽核日誌與可觀測性。尚未串接 Stripe,方案只能由營運人員改資料庫。
+M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**只有 API,沒有前端;尚未串接 Stripe。** 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。尚未串接 Stripe,方案只能由營運人員改資料庫。
 
 ## 快速開始
 ```
@@ -30,6 +32,8 @@ curl 127.0.0.1:3001/health
 | GET | `/t/{slug}/members` | 該店成員 |
 | GET | `/t/{slug}/plan` | 目前方案與用量(manager 以上) |
 | GET | `/plans` | 公開的方案列表 |
+| GET | `/t/{slug}/audit-logs` | 稽核日誌(manager 以上,唯讀):`?action=booking.&entity_type=&entity_id=&actor_user_id=&from=&to=&limit=&before=` |
+| GET | `/metrics` | Prometheus 指標,需 `Authorization: Bearer $METRICS_TOKEN`;未設定 `METRICS_TOKEN` 時不存在 |
 | GET / POST | `/t/{slug}/services` | 服務項目清單(`?active=&limit=&offset=`)/ 新增(manager) |
 | GET / PATCH / DELETE | `/t/{slug}/services/{id}` | 查詢 / 局部更新 / 刪除(manager) |
 | GET / PUT | `/t/{slug}/members/{user_id}/services` | 員工可提供的服務(PUT 為 manager) |
@@ -60,6 +64,12 @@ curl 127.0.0.1:3001/health
 | GET / POST | `/t/{slug}/bookings` | 列表(staff 只看自己的)/ 代客預約 |
 | PATCH | `/t/{slug}/bookings/{id}` | 改狀態(cancelled / completed / no_show)與備註 |
 
+## 稽核與可觀測性
+- **稽核日誌**:誰在何時改了什麼,與變更同一交易寫入,資料庫層面只能新增、不能改或刪。內容不含 Email、電話、token、休假原因。
+- **日誌**:預設人類可讀;`LOG_FORMAT=json` 輸出 JSON。每筆請求日誌帶 `request_id` 與路由樣板(`/public/bookings/{token}`),**不記實際網址**,因為網址裡有顧客的預約管理 token。
+- **請求 ID**:沿用合法的 `X-Request-Id`(英數、`-`、`_`,≤ 64 字),否則產生新的,回應一律帶回。
+- **指標**:設定 `METRICS_TOKEN`(至少 16 字元)後開放 `GET /metrics`,含請求數 / 延遲、寄信與 worker 計數,以及 `email_outbox_pending`、`email_outbox_failed`、`email_outbox_oldest_due_age_seconds`(信件積壓多久)。
+
 ## 方案與限額
 新店家預設「免費版」:2 位成員(含待接受的邀請)、5 項啟用中的服務、每月 50 筆預約(依店家當地月份)。超過時員工端回 **402**,顧客端一律回 409「額滿」(不暴露方案資訊)。上限依 `plans` 表,數字僅為示範。
 
@@ -72,5 +82,15 @@ curl 127.0.0.1:3001/health
 ## 測試
 ```
 docker compose up -d postgres
-cargo test
+cargo test            # 一般測試,用超級使用者連線
 ```
+一般測試證明不了「正式環境用受限帳號時一切正常」。另有一個預設忽略的測試用受限帳號跑完整流程,
+需要乾淨的 PostgreSQL 叢集,步驟見 `docs/deployment.md` 末段與 `.github/workflows/ci.yml`。
+
+## Docker
+```
+docker build -t tenant-saas .
+docker run --rm tenant-saas migrate   # 一次性,用 MIGRATION_DATABASE_URL
+docker run -d -p 3001:3001 tenant-saas # 預設 APP_ENV=production:資料庫帳號過大會拒絕啟動
+```
+**不要在正式環境用超級使用者連線**——會繞過租戶隔離。詳見 `docs/deployment.md`。

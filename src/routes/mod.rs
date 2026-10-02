@@ -1,3 +1,4 @@
+mod audit_logs;
 mod auth;
 mod bookings;
 mod health;
@@ -16,18 +17,26 @@ use axum::{
     response::Response,
     routing::get,
 };
+use metrics_exporter_prometheus::PrometheusHandle;
 use sqlx::PgPool;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
-use crate::{auth::JwtKeys, config::Config, error::AppError, ratelimit::RateLimiter};
+use crate::{
+    auth::JwtKeys, config::Config, error::AppError, observability, ratelimit::RateLimiter,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub jwt: JwtKeys,
     pub public_limiter: Arc<RateLimiter>,
+    /// 註冊 / 登入專用,比公開預約端點嚴格得多(防暴力破解與灌帳號)
+    pub auth_limiter: Arc<RateLimiter>,
     pub trust_proxy: bool,
     pub public_base_url: String,
+    pub metrics: Option<PrometheusHandle>,
+    pub metrics_token: Option<String>,
 }
 
 impl AppState {
@@ -39,9 +48,20 @@ impl AppState {
                 config.public_rate_limit_per_min,
                 Duration::from_secs(60),
             )),
+            auth_limiter: Arc::new(RateLimiter::new(
+                config.auth_rate_limit_per_min,
+                Duration::from_secs(60),
+            )),
             trust_proxy: config.trust_proxy,
             public_base_url: config.public_base_url.clone(),
+            metrics: None,
+            metrics_token: config.metrics_token.clone(),
         }
+    }
+
+    pub fn with_metrics(mut self, handle: PrometheusHandle) -> Self {
+        self.metrics = Some(handle);
+        self
     }
 }
 
@@ -80,7 +100,25 @@ async fn rate_limit_public(
     Ok(next.run(req).await)
 }
 
+async fn rate_limit_auth(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    if !state
+        .auth_limiter
+        .check(&client_key(&req, state.trust_proxy))
+    {
+        return Err(AppError::TooManyRequests);
+    }
+    Ok(next.run(req).await)
+}
+
 pub fn router(state: AppState) -> Router {
+    let credentials = auth::credential_routes().layer(middleware::from_fn_with_state(
+        state.clone(),
+        rate_limit_auth,
+    ));
     let public = public::routes().layer(middleware::from_fn_with_state(
         state.clone(),
         rate_limit_public,
@@ -88,12 +126,22 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .merge(auth::routes())
+        .merge(credentials)
         .merge(tenants::routes())
         .merge(members::routes())
         .merge(services::routes())
         .merge(scheduling::routes())
         .merge(bookings::routes())
+        .merge(audit_logs::routes())
         .merge(public)
-        .layer(TraceLayer::new_for_http())
+        .route("/metrics", get(observability::metrics_handler))
+        // 越後加的越外層:請求 ID 最外層 → 指標 → 日誌 → 路由
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(observability::make_span)
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
+        .layer(middleware::from_fn(observability::track_metrics))
+        .layer(middleware::from_fn(observability::request_id))
         .with_state(state)
 }

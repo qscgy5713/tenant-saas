@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # 格式、靜態檢查、一般測試(用超級使用者連線,和本機開發一致)
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tenant
+          POSTGRES_PASSWORD: tenant
+          POSTGRES_DB: tenant_saas
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tenant -d tenant_saas"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgres://tenant:tenant@localhost:5432/tenant_saas
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  # 用正式環境的受限帳號把整個流程跑一遍。
+  # 一般測試都是超級使用者,繞過權限與 RLS,證明不了正式環境的行為;這個工作補上。
+  # 需要全新的叢集(PostgreSQL 的角色是整個叢集共用的),所以獨立成一個工作。
+  restricted-role:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: admin-pw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      PGPASSWORD: admin-pw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: 佈建 migrator(管理員執行一次)
+        run: psql "postgres://postgres@localhost:5432/postgres" -v migrator_password="'migrator-pw'" -f deploy/provision.sql
+      - name: 以非超級使用者的 migrator 套用 migration
+        run: ./target/debug/tenant-saas migrate
+        env:
+          MIGRATION_DATABASE_URL: postgres://tenant_migrator:migrator-pw@localhost:5432/tenant_saas
+      - name: 啟用 runtime 帳號登入
+        run: psql "postgres://tenant_migrator:migrator-pw@localhost:5432/tenant_saas" -c "ALTER ROLE tenant_runtime WITH LOGIN PASSWORD 'runtime-pw'"
+      - name: 撤銷 migrator 的成員資格,確認 SECURITY DEFINER 函式不依賴它
+        run: >-
+          psql "postgres://postgres@localhost:5432/tenant_saas" -v ON_ERROR_STOP=1 -c
+          "REVOKE tenant_worker FROM tenant_migrator CASCADE; REVOKE tenant_app FROM tenant_migrator CASCADE;
+           GRANT tenant_app TO tenant_runtime WITH INHERIT FALSE, SET TRUE;
+           GRANT tenant_worker TO tenant_runtime WITH INHERIT FALSE, SET TRUE;"
+      - name: 以受限的 runtime 帳號執行整個流程
+        run: cargo test --locked --test restricted_role -- --ignored
+        env:
+          RESTRICTED_RUNTIME_URL: postgres://tenant_runtime:runtime-pw@localhost:5432/tenant_saas
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

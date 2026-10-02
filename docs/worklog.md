@@ -2,6 +2,36 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-02(M9 部署)
+- Dockerfile(172MB、非 root、健康檢查)、`.dockerignore`、CI 工作流程、`deploy/provision.sql`、`docs/deployment.md`
+- 子命令:`serve`(預設)、`migrate`、`healthcheck`;`migrate` 用 `MIGRATION_DATABASE_URL`
+- `dbrole.rs`:啟動時檢查連線帳號(超級使用者 / BYPASSRLS / 擁有資料表 / 可直接讀租戶資料表);`APP_ENV=production` 過大就拒絕啟動
+- migration `0010_runtime_role.sql`(`tenant_runtime`:NOINHERIT,只直接讀寫 users / 讀 plans)、`0011_bookings_no_force.sql`
+- `tests/restricted_role.rs`(預設 `#[ignore]`):用受限帳號跑完整流程,並驗證「直接查租戶資料表必須 permission denied」
+- 測試共 101 項(+1 項受限帳號測試需獨立叢集)
+- **用真實的非超級使用者環境驗證,抓到三個一般測試永遠看不到的問題**:
+  1. `booking_tenant_by_token()`(SECURITY DEFINER)讀 FORCE RLS 的 bookings,只因為 migrator 碰巧是 `tenant_worker` 成員才能運作;換一個沒有這個成員資格的 migrator,**所有顧客的預約連結會悄悄變成 404**。已重現並以 migration 0011 修正,CI 會撤銷成員資格後再驗證。**我一開始的假設是「整個流程會壞」,實際測試通過了**——查下去才發現是意外的權限在撐著,而不是我原本想的原因
+  2. `sqlx::migrate!` 在編譯時嵌入 migration,Cargo 不追蹤 `migrations/` 資料夾:單獨新增 migration 檔,程式會回報「migration 完成」卻沒套用。加 `build.rs` 修正。先前每次新增 migration 都剛好同時改了原始碼,所以沒碰到
+  3. production 沒設 `SMTP_URL` 時走 Log 模式,會把含一次性連結的信件內容印進日誌(演練容器時在日誌裡看到)。production 現在拒絕啟動
+- 另外補上註冊 / 登入限流(M2 起一直標為待辦的真實缺口)
+- 容器演練:超級使用者 / migrator 當連線帳號 → 拒絕啟動(訊息清楚);受限帳號 → healthy、非 root、真實 SMTP 寄出、日誌與指標無 token、`docker stop` 0.2 秒乾淨退出(exit 0)
+- 未驗證:CI 在 GitHub 上實際執行(只驗證 YAML 語法與本機重現每一步);TLS 連資料庫;跨實例限流
+- 下一步:所有里程碑完成。可選:Stripe、忘記密碼、前端、帳號鎖定;或先收尾 `todo.md` 的待辦
+
+## 2026-10-02(M8 稽核日誌與可觀測性)
+- migration `0009_audit.sql`:`audit_logs`(只能新增)、`create_tenant()` 與 `accept_invitation()` 改為在函式內寫稽核(兩者執行時沒有租戶上下文)
+- `audit.rs` + 各 handler:服務、成員、邀請、營業時間、休假、預約(員工 / 顧客 / 系統三種操作者)全部記錄;系統取消會帶原因(`monthly_limit`、`no_longer_bookable`、`slot_taken`、`confirmation_expired`)
+- `observability.rs`:請求 ID、只記路由樣板的日誌 span、Prometheus 指標、受保護的 `/metrics`(含 outbox 堆積);`LOG_FORMAT=json`
+- 測試共 99 項通過(原 81 + 稽核 9 + 可觀測性 6 + 單元 3);三個突變驗證(換回預設日誌 → 洩漏 token、給稽核表 UPDATE 權限、略過稽核寫入)都被測試抓到;並實際啟動程式驗證 JSON 日誌、請求 ID、`/metrics`
+- **發現並修掉的真實問題**:
+  1. 預設的請求日誌會把完整網址寫進去,而顧客預約管理 token 就在網址路徑裡(`/public/bookings/{token}`),任何能看日誌的人都能取消 / 改期別人的預約。改為只記路由樣板,並用測試鎖住
+  2. **M6 的遺留 bug**:員工不能取消「待確認」的預約。M6 當時用字串替換修改狀態檢查,但 `cargo fmt` 已把那行拆成多行,替換靜默沒生效,而且測試沒涵蓋。現在修好並補測試
+  3. 我寫的一個測試設了全域環境變數 `DATABASE_URL`,害同程式內並行的 `sqlx::test` 全部在初始化時失敗。改成純函式驗證,不碰環境變數
+- **反覆出現的問題**:`cargo fmt` 重排後,Python 字串替換靜默沒套用(M6、M8 各發生過)。之後替換一律 `assert old in s`,改動較大時直接用精確編輯;並逐項 grep 核對 `main.rs` 這類「測試碰不到」的接線
+- 決定:稽核 detail 不放任何個資(稽核表只增不減,寫進去就收不回);休假原因、備註內容、Email 都不記,只記「有異動」
+- 已知限制:稽核永久保留;未記錄登入 / 授權失敗;`slot_taken` 路徑只在真正同時確認時才觸發,沒有確定性測試
+- 下一步:M9 Docker 化、CI(fmt / clippy / test)與部署文件
+
 ## 2026-10-02(M7 方案與限額,不含 Stripe)
 - migration `0008_plans.sql`:`plans` 表與三個方案、`tenants.plan_id`、`accept_invitation()` 加入人數檢查;`tenant_app` / `tenant_worker` 對 plans 只讀
 - `plan.rs`:成員 / 服務 / 每月預約三種限額;每家店每種資源一把 advisory lock,檢查與寫入在同一個臨界區;月份依店家當地時區計算(單元測試含跨年、夏令時間)

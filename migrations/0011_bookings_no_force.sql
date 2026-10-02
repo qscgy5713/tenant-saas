@@ -1,0 +1,11 @@
+-- booking_tenant_by_token() 是 SECURITY DEFINER,以資料表擁有者身分讀取 bookings。
+-- bookings 原本是 FORCE ROW LEVEL SECURITY,擁有者也受政策約束,而當下沒有租戶上下文 → 讀不到任何列 →
+-- 所有顧客的預約連結都會悄悄變成 404。
+--
+-- 之前在開發環境(超級使用者)與 migrator 剛好是 tenant_worker 成員時(bookings 上有
+-- 「tenant_worker USING (true)」的政策)都碰巧能運作,但那是意外:換一個沒有這個成員資格的 migrator
+-- (例如託管資料庫另行佈建)就會壞。tests/restricted_role.rs + CI 會撤銷成員資格後驗證這點。
+--
+-- 與 tenants / memberships / invitations 等 SECURITY DEFINER 函式會碰的表一致:只 ENABLE、不 FORCE。
+-- 這不削弱隔離:執行階段帳號與 tenant_app 都不是擁有者,仍完全受 RLS 約束。
+ALTER TABLE bookings NO FORCE ROW LEVEL SECURITY;

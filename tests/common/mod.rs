@@ -21,12 +21,16 @@ pub fn test_config(ttl: u64) -> Config {
         jwt_secret: "test-secret-test-secret-test-secret-123".into(),
         jwt_ttl_secs: ttl,
         public_rate_limit_per_min: 100_000,
+        auth_rate_limit_per_min: 100_000,
         trust_proxy: false,
         smtp_url: None,
         mail_from: "test <test@example.com>".into(),
         public_base_url: "http://app.test".into(),
         worker_enabled: false,
         worker_poll_secs: 1,
+        metrics_token: None,
+        production: false,
+        auto_migrate: true,
     }
 }
 
@@ -143,4 +147,12 @@ pub async fn set_plan(pool: &PgPool, slug: &str, plan: &str) {
         .execute(pool)
         .await
         .unwrap();
+}
+
+pub fn app_with_auth_limit(pool: PgPool, limit: u32) -> Router {
+    let config = Config {
+        auth_rate_limit_per_min: limit,
+        ..test_config(3600)
+    };
+    routes::router(AppState::new(pool, &config))
 }

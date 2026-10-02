@@ -16,11 +16,15 @@ use crate::{
     validation::normalize_email,
 };
 
-pub fn routes() -> Router<AppState> {
+/// 註冊與登入:可被暴力嘗試 / 灌帳號,所以另外掛限流(見 routes/mod.rs)
+pub fn credential_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
-        .route("/auth/me", get(me))
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/auth/me", get(me))
 }
 
 #[derive(Debug, Deserialize)]

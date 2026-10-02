@@ -272,6 +272,17 @@ CREATE POLICY tenant_isolation ON services
 - `email_outbox`:`dedupe_key` 唯一,同一件事只排一封信;`tenant_app` 只有 SELECT / INSERT(請求內只能排信,不能改或刪)
 - 角色 `tenant_worker`:`NOLOGIN NOBYPASSRLS`,明確授權 `email_outbox`(完整)、`bookings`(讀 / 更新)、`customers`、`services`、`tenants`(唯讀)、`users(id, name)`;對應的 RLS 政策都寫明 `TO tenant_worker`
 
+## 補充:M9 新增(`0010_runtime_role.sql`、`0011_bookings_no_force.sql`)
+- 角色 `tenant_runtime`:`NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS`,是 `tenant_app` / `tenant_worker` 的成員(`WITH INHERIT FALSE, SET TRUE`);直接權限只有 `users` 的 SELECT / INSERT 與 `plans` 的 SELECT。登入由營運人員另外啟用(migration 不保管密碼)
+- `bookings` 改為 `NO FORCE ROW LEVEL SECURITY`,原因見 `decisions.md`
+- 完整的角色表與佈建步驟見 `docs/deployment.md`
+
+## 補充:M8 新增(`0009_audit.sql`)
+- `audit_logs(id bigint identity, tenant_id, actor_type[user|customer|system], actor_user_id, action, entity_type, entity_id, detail jsonb, created_at)`;`CHECK`:actor_type 為 user 時必有 actor_user_id,否則必為 NULL
+- 權限:`tenant_app` SELECT + INSERT(政策綁 `app_tenant_id()`);`tenant_worker` 只有 INSERT;兩者都沒有 UPDATE / DELETE / TRUNCATE
+- 只 `ENABLE` 不 `FORCE` RLS,讓 `create_tenant()` / `accept_invitation()`(SECURITY DEFINER)能在沒有租戶上下文時寫入
+- 動作命名:`<實體>.<動詞>`,例如 `booking.cancelled`、`member.role_changed`
+
 ## 補充:M7 新增(`0008_plans.sql`)
 - `plans(id, name, price_cents, max_staff, max_services, max_bookings_per_month)`,NULL 表示不限;預設三個方案:free(2 人 / 5 服務 / 50 預約)、pro(10 / 50 / 1000)、business(不限)。數字只是示範,上線前要依實際定價調整
 - `tenants.plan_id`(預設 `free`);`tenant_app`、`tenant_worker` 對 `plans` 只有 SELECT

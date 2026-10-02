@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::AppState;
 use crate::{
+    audit::{self, Actor},
     db::{PG_EXCLUSION_VIOLATION, PG_FOREIGN_KEY_VIOLATION, Tx, pg_code},
     error::AppError,
     tenancy::TenantCtx,
@@ -108,6 +111,16 @@ async fn put_staff_services(
         }
     }
     let ids = load_staff_services(&mut tx, user_id).await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "member.services_replaced",
+        "member",
+        Some(user_id),
+        json!({ "count": ids.service_ids.len() }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(ids))
 }
@@ -223,6 +236,16 @@ async fn put_working_hours(
         }
     }
     let body = load_working_hours(&mut tx, user_id).await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "member.working_hours_replaced",
+        "member",
+        Some(user_id),
+        json!({ "entries": body.hours.len() }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(body))
 }
@@ -297,6 +320,17 @@ async fn create_time_off(
     .bind(req.reason)
     .fetch_one(&mut *tx)
     .await?;
+    // 休假原因可能涉及隱私,不寫進(無法刪除的)稽核紀錄
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "time_off.created",
+        "time_off",
+        Some(row.id),
+        json!({ "member_id": user_id }),
+    )
+    .await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(row)))
 }
@@ -317,6 +351,16 @@ async fn delete_time_off(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "time_off.deleted",
+        "time_off",
+        Some(id),
+        json!({ "member_id": owner }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

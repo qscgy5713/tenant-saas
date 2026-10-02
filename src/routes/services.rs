@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::AppState;
 use crate::{
+    audit::{self, Actor},
     db::{PG_FOREIGN_KEY_VIOLATION, pg_code},
     error::AppError,
     plan,
@@ -138,6 +141,16 @@ async fn create(
     .bind(price)
     .fetch_one(&mut *tx)
     .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "service.created",
+        "service",
+        Some(service.id),
+        json!({ "duration_minutes": service.duration_minutes, "price_cents": service.price_cents }),
+    )
+    .await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(service)))
 }
@@ -193,6 +206,20 @@ async fn update(
             plan::ensure_service_slot(&mut tx, ctx.tenant_id).await?;
         }
     }
+    // 先記下要改哪些欄位(只記欄位名稱與非敏感的新值)
+    let mut changed = serde_json::Map::new();
+    if let Some(n) = &name {
+        changed.insert("name".into(), json!(n));
+    }
+    if let Some(v) = req.duration_minutes {
+        changed.insert("duration_minutes".into(), json!(v));
+    }
+    if let Some(v) = req.price_cents {
+        changed.insert("price_cents".into(), json!(v));
+    }
+    if let Some(v) = req.active {
+        changed.insert("active".into(), json!(v));
+    }
     let service = sqlx::query_as::<_, Service>(
         "UPDATE services SET
             name = COALESCE($2, name),
@@ -209,8 +236,21 @@ async fn update(
     .bind(req.active)
     .fetch_optional(&mut *tx)
     .await?;
+    let Some(service) = service else {
+        return Err(AppError::NotFound);
+    };
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "service.updated",
+        "service",
+        Some(service.id),
+        json!({ "changed": changed }),
+    )
+    .await?;
     tx.commit().await?;
-    service.map(Json).ok_or(AppError::NotFound)
+    Ok(Json(service))
 }
 
 async fn remove(
@@ -235,6 +275,16 @@ async fn remove(
     if affected == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "service.deleted",
+        "service",
+        Some(id),
+        audit::empty(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -61,6 +61,36 @@
 ## 2026-10-02 背景 worker 的權限:獨立角色 `tenant_worker`
 - **原因**:worker 要跨租戶處理,但不該是超級使用者。它沒有 BYPASSRLS,只對需要的表有明確政策與權限(測試證明:讀不到 `password_hash`、不能刪預約、不能寫服務、讀不到 memberships)
 
+## 2026-10-02 資料庫帳號:migrator / runtime 分離,runtime 碰不到租戶資料表
+- **原因**:超級使用者、BYPASSRLS、資料表擁有者都繞過 RLS。runtime 帳號 `NOINHERIT`,本身只有 `users`(註冊 / 登入)與 `plans` 的權限,租戶資料一律得先 `SET LOCAL ROLE tenant_app`。漏掉 `begin_scoped` 的程式碼會 permission denied(失敗即關閉),而不是悄悄越權
+- **啟動檢查**:`APP_ENV=production` 時帳號過大就拒絕啟動,而不是只在文件裡叮嚀
+- **migration 與 runtime 分帳號**:runtime 沒有建表 / 建角色權限,SQL injection 的破壞範圍小很多;`migrate` 是一次性命令,不在應用程式啟動時執行
+- **取捨**:多一個角色要佈建,且需要 PostgreSQL 16+;`users` 仍需直接存取(登入時還沒有租戶),`password_hash` 因此對 runtime 帳號可讀——這是已知的剩餘暴露面
+
+## 2026-10-02 bookings 不再 FORCE RLS
+- 原本 `bookings` 是 FORCE RLS,但 `booking_tenant_by_token()` 是 SECURITY DEFINER,以擁有者身分在沒有租戶上下文時讀它。FORCE 下擁有者也受政策約束 → 讀不到 → 預約連結悄悄 404。之前只因 migrator 碰巧是 `tenant_worker` 成員(該角色有 `USING (true)` 政策)才運作
+- 改為只 `ENABLE`,與其他會被 SECURITY DEFINER 函式碰到的表一致。**不削弱隔離**:runtime 與 `tenant_app` 都不是擁有者,仍完全受 RLS 約束
+- 教訓:超級使用者環境下的測試通過,證明不了受限帳號下也通過。所以新增 `restricted_role` 測試與 CI 工作,並刻意撤銷 migrator 的成員資格
+
+## 2026-10-02 正式環境不允許 Log 模式寄信
+- Log 模式把信件內容(含一次性連結)印進日誌,等同把取消 / 改期 / 加入店家的權限寫進日誌。只給開發用;`APP_ENV=production` 沒設 `SMTP_URL` 就拒絕啟動(要暫時不寄信請設 `WORKER_ENABLED=false`)
+
+## 2026-10-02 登入與註冊限流
+- 每來源每分鐘 10 次(`AUTH_RATE_LIMIT_PER_MIN`),比公開預約端點嚴格。超過後連正確密碼也被擋——這是限流的目的
+- **限制**:IP 層級、單一實例記憶體內。分散式暴力破解、跨實例需要帳號層級鎖定與 Redis,尚未做
+
+## 2026-10-02 稽核日誌:同交易寫入、只增不減、不記個資
+- **同交易**:變更成功才有紀錄、失敗一起消失(有測試:被擋下的第 6 個服務、重複邀請都不留紀錄)。`create_tenant()`、`accept_invitation()` 執行時沒有租戶上下文,所以稽核寫在 SQL 函式裡
+- **只增不減**:`tenant_app` 只有 SELECT / INSERT,`tenant_worker` 只有 INSERT(連讀都不行)。這是資料庫層的保證,不是靠應用程式自律(有測試,也做過突變驗證)
+- **不記個資**:因為刪不掉,寫進去的 Email、電話、備註、休假原因就收不回來。只記識別碼、狀態轉換、欄位名稱。代價:要查「是哪位顧客」得回頭用 booking id 查,這是刻意的
+- `actor_user_id` 不設外鍵:使用者離開後紀錄仍須保留;顯示時 LEFT JOIN 取目前姓名
+- 不記錄:登入 / 註冊、授權失敗、讀取。這些量大且性質不同,日後用安全日誌處理
+
+## 2026-10-02 日誌與指標只用路由樣板
+- **原因**:預約管理 token 在網址路徑裡,預設的 `TraceLayer` 與 `DefaultMakeSpan` 會把完整 URI 寫進日誌——取得日誌的人就能取消 / 改期任何顧客的預約。改記 `/public/bookings/{token}`。同樣,指標的 `path` label 對不存在的路徑用固定的 `unmatched`,避免攻擊者製造無限多個 label
+- 請求 ID 只接受英數、`-`、`_` 且 ≤ 64 字,否則換掉:它會進日誌,不能讓用戶端偽造日誌行
+- `/metrics` 預設不存在(404);設定 `METRICS_TOKEN`(≥ 16 字元,不足則拒絕啟動)才開放,並以固定時間比對 token
+
 ## 2026-10-02 限額的併發控制:per-tenant advisory lock,不用 SERIALIZABLE 或計數欄位
 - **原因**:「先 count 再 insert」在讀已提交下一定會超賣。`pg_advisory_xact_lock(hash('quota:{種類}:{租戶}'))` 讓同一家店同一種資源的檢查+寫入序列化,不同店、不同資源互不阻塞,交易結束自動釋放
 - **替代方案**:SERIALIZABLE(需處理重試,影響整個交易);獨立計數欄位(要和真實資料保持一致,刪除 / 取消時容易漏);

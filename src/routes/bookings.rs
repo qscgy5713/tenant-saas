@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::AppState;
 use crate::{
+    audit::{self, Actor},
     booking::{self, BookingStatus, NewBooking},
     error::AppError,
     mail, outbox,
@@ -142,6 +145,16 @@ async fn create(
         Some(&format!("confirmed:{}", created.id)),
     )
     .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "booking.created",
+        "booking",
+        Some(created.id),
+        json!({ "source": "staff", "staff_id": created.staff_id, "starts_at": created.starts_at }),
+    )
+    .await?;
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
@@ -200,18 +213,25 @@ async fn update(
 
     if let Some(new_status) = req.status {
         // 取消、完成、未到都是終態:已取消的時段可能已被別人訂走,不能復活
-        if status != BookingStatus::Confirmed {
+        if !matches!(status, BookingStatus::Confirmed | BookingStatus::Pending) {
             return Err(AppError::Conflict("此預約已取消或已結束".into()));
         }
-        if matches!(new_status, BookingStatus::Completed | BookingStatus::NoShow)
-            && starts_at > Utc::now()
-        {
-            return Err(AppError::BadRequest(
-                "預約尚未開始,不能標記為完成或未到".into(),
-            ));
+        // 完成、未到只適用於已確認且已開始的預約;待確認的預約只能取消
+        if matches!(new_status, BookingStatus::Completed | BookingStatus::NoShow) {
+            if status == BookingStatus::Pending {
+                return Err(AppError::BadRequest(
+                    "尚未確認的預約不能標記為完成或未到".into(),
+                ));
+            }
+            if starts_at > Utc::now() {
+                return Err(AppError::BadRequest(
+                    "預約尚未開始,不能標記為完成或未到".into(),
+                ));
+            }
         }
     }
 
+    let notes_changed = req.notes.is_some();
     let updated = sqlx::query_as::<_, Updated>(
         "UPDATE bookings SET status = COALESCE($2, status), notes = COALESCE($3, notes)
          WHERE id = $1 RETURNING id, status, notes",
@@ -220,6 +240,28 @@ async fn update(
     .bind(req.status)
     .bind(req.notes)
     .fetch_one(&mut *tx)
+    .await?;
+    // 備註可能含顧客個資,稽核只記「備註有異動」,不記內容
+    let (action, detail) = match req.status {
+        Some(to) => (
+            match to {
+                BookingStatus::Cancelled => "booking.cancelled",
+                BookingStatus::Completed => "booking.completed",
+                _ => "booking.no_show",
+            },
+            json!({ "from": status, "to": to, "notes_changed": notes_changed }),
+        ),
+        None => ("booking.notes_updated", json!({ "notes_changed": true })),
+    };
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        action,
+        "booking",
+        Some(id),
+        detail,
+    )
     .await?;
     tx.commit().await?;
     Ok(Json(updated))

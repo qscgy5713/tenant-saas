@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use chrono::Utc;
 use chrono_tz::Tz;
+use serde_json::json;
 use sqlx::{FromRow, PgPool};
 use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
+    audit::{self, Actor},
     booking::PENDING_TTL_HOURS,
     db::begin_worker,
     error::AppError,
@@ -54,19 +56,31 @@ pub async fn tick(pool: &PgPool, mailer: &Mailer) -> Result<TickStats, AppError>
     Ok(stats)
 }
 
-/// 超過有效期仍未確認的預約:取消(本來就不占時段,只是整理狀態)
+/// 超過有效期仍未確認的預約:取消(本來就不占時段,只是整理狀態),並寫入稽核
 async fn expire_pending(pool: &PgPool) -> Result<u64, AppError> {
     let mut tx = begin_worker(pool).await?;
-    let n = sqlx::query(
+    let expired: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "UPDATE bookings SET status = 'cancelled'
-         WHERE status = 'pending' AND created_at < now() - make_interval(hours => $1)",
+         WHERE status = 'pending' AND created_at < now() - make_interval(hours => $1)
+         RETURNING id, tenant_id",
     )
     .bind(PENDING_TTL_HOURS)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut *tx)
+    .await?;
+    for (booking_id, tenant_id) in &expired {
+        audit::record(
+            &mut tx,
+            *tenant_id,
+            Actor::System,
+            "booking.cancelled",
+            "booking",
+            Some(*booking_id),
+            json!({ "to": "cancelled", "reason": "confirmation_expired" }),
+        )
+        .await?;
+    }
     tx.commit().await?;
-    Ok(n)
+    Ok(expired.len() as u64)
 }
 
 #[derive(FromRow)]
@@ -248,9 +262,17 @@ pub async fn run(
     tracing::info!(?poll, "背景 worker 啟動");
     while !*shutdown.borrow() {
         match tick(&pool, &mailer).await {
-            Ok(stats) if stats != TickStats::default() => tracing::info!(?stats, "worker tick"),
+            Ok(stats) if stats != TickStats::default() => {
+                metrics::counter!("emails_sent_total").increment(stats.sent);
+                metrics::counter!("emails_retried_total").increment(stats.retried);
+                metrics::counter!("emails_failed_total").increment(stats.failed);
+                tracing::info!(?stats, "worker tick");
+            }
             Ok(_) => {}
-            Err(err) => tracing::error!(error = %err, "worker tick 失敗"),
+            Err(err) => {
+                metrics::counter!("worker_tick_errors_total").increment(1);
+                tracing::error!(error = %err, "worker tick 失敗");
+            }
         }
         tokio::select! {
             _ = tokio::time::sleep(poll) => {}

@@ -1,10 +1,13 @@
+pub mod audit;
 pub mod auth;
 pub mod availability;
 pub mod booking;
 pub mod config;
 pub mod db;
+pub mod dbrole;
 pub mod error;
 pub mod mail;
+pub mod observability;
 pub mod outbox;
 pub mod plan;
 pub mod ratelimit;

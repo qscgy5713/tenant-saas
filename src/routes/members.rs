@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::AppState;
 use crate::{
+    audit::{self, Actor},
     auth::AuthUser,
     db::{PG_FOREIGN_KEY_VIOLATION, PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
     error::AppError,
@@ -130,6 +133,16 @@ async fn create_invitation(
         Some(&format!("invite:{id}")),
     )
     .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "invitation.created",
+        "invitation",
+        Some(id),
+        json!({ "role": req.role }),
+    )
+    .await?;
     tx.commit().await?;
 
     Ok((
@@ -190,6 +203,16 @@ async fn revoke_invitation(
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "invitation.revoked",
+        "invitation",
+        Some(id),
+        json!({ "role": role }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -266,7 +289,8 @@ async fn change_role(
             .bind(user_id)
             .fetch_optional(&mut *tx)
             .await?;
-    if current.ok_or(AppError::NotFound)? == Role::Owner {
+    let current = current.ok_or(AppError::NotFound)?;
+    if current == Role::Owner {
         return Err(AppError::Conflict("擁有者的角色不可變更".into()));
     }
     sqlx::query("UPDATE memberships SET role = $2 WHERE user_id = $1")
@@ -274,6 +298,16 @@ async fn change_role(
         .bind(req.role)
         .execute(&mut *tx)
         .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "member.role_changed",
+        "member",
+        Some(user_id),
+        json!({ "from": current, "to": req.role }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(Json(MemberRole {
         user_id,
@@ -312,6 +346,21 @@ async fn remove_member(
         }
         Err(e) => return Err(e.into()),
     }
+    let action = if user_id == ctx.user_id {
+        "member.left"
+    } else {
+        "member.removed"
+    };
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        action,
+        "member",
+        Some(user_id),
+        json!({ "role": target }),
+    )
+    .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

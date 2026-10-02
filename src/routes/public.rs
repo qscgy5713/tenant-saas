@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Acquire, FromRow};
 use uuid::Uuid;
 
+use serde_json::json;
+
 use super::AppState;
 use crate::{
+    audit::{self, Actor},
     availability::Slot,
     booking::{self, BookingStatus, NewBooking, PENDING_TTL_HOURS},
     db::{PG_EXCLUSION_VIOLATION, Tx, begin_scoped, pg_code, set_tenant},
@@ -52,6 +55,29 @@ fn hide_plan_details(err: AppError) -> AppError {
         }
         other => other,
     }
+}
+
+/// 系統代為取消(確認當下發現無法成立)。理由寫進稽核,方便事後解釋「為什麼我的預約不見了」。
+async fn auto_cancel(
+    tx: &mut Tx,
+    tenant_id: Uuid,
+    booking_id: Uuid,
+    reason: &str,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
+        .bind(booking_id)
+        .execute(&mut **tx)
+        .await?;
+    audit::record(
+        tx,
+        tenant_id,
+        Actor::System,
+        "booking.cancelled",
+        "booking",
+        Some(booking_id),
+        json!({ "to": BookingStatus::Cancelled, "reason": reason }),
+    )
+    .await
 }
 
 /// 依網址代稱開啟已設定租戶上下文的交易。店家不存在或已停權一律 404。
@@ -228,6 +254,16 @@ async fn create_booking(
         Some(&format!("verify:{}", created.id)),
     )
     .await?;
+    audit::record(
+        &mut tx,
+        tenant_id,
+        Actor::Customer,
+        "booking.requested",
+        "booking",
+        Some(created.id),
+        json!({ "staff_id": created.staff_id, "starts_at": created.starts_at }),
+    )
+    .await?;
     tx.commit().await?;
 
     Ok((
@@ -333,10 +369,7 @@ async fn confirm_booking(
 
     // 申請之後營業時間、休假、服務狀態可能變了:確認的這一刻重新檢查
     if !booking::still_bookable(&mut tx, tz, id, service_id, staff_id, starts_at).await? {
-        sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        auto_cancel(&mut tx, tenant_id, id, "no_longer_bookable").await?;
         tx.commit().await?;
         return Err(AppError::Conflict(
             "這個時段已無法預約,請重新選擇時間".into(),
@@ -346,10 +379,7 @@ async fn confirm_booking(
     // 確認就是占位,要計入每月額度:序列化檢查。額滿就把這筆標為取消並明確告知(而不是讓連結一直掛著)
     if let Err(err) = plan::ensure_booking_slot(&mut tx, tenant_id, tz, starts_at, true).await {
         if matches!(err, AppError::LimitReached(_)) {
-            sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            auto_cancel(&mut tx, tenant_id, id, "monthly_limit").await?;
             tx.commit().await?;
             return Err(AppError::Conflict(
                 "這家店本月預約已額滿,暫時無法接受新預約".into(),
@@ -369,10 +399,7 @@ async fn confirm_booking(
         Ok(_) => sp.commit().await?,
         Err(e) if pg_code(&e).as_deref() == Some(PG_EXCLUSION_VIOLATION) => {
             sp.rollback().await?;
-            sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            auto_cancel(&mut tx, tenant_id, id, "slot_taken").await?;
             tx.commit().await?;
             return Err(AppError::Conflict(
                 "這個時段在您確認之前已被其他人預約,請重新選擇時間".into(),
@@ -385,6 +412,16 @@ async fn confirm_booking(
     let link = mail::booking_link(&state.public_base_url, &raw);
     let email = mail::confirmed(&ctx.view(), &link);
     outbox::enqueue(&mut tx, tenant_id, &email, Some(&format!("confirmed:{id}"))).await?;
+    audit::record(
+        &mut tx,
+        tenant_id,
+        Actor::Customer,
+        "booking.confirmed",
+        "booking",
+        Some(id),
+        audit::empty(),
+    )
+    .await?;
     let view = load_by_token(&mut tx, &raw).await?;
     tx.commit().await?;
     Ok(Json(view))
@@ -394,12 +431,22 @@ async fn cancel_booking(
     State(state): State<AppState>,
     Path(raw): Path<String>,
 ) -> Result<Json<PublicBooking>, AppError> {
-    let (mut tx, _, _) = open_by_token(&state, &raw).await?;
-    let current = lock_changeable(&mut tx, &raw, true).await?;
+    let (mut tx, tenant_id, _) = open_by_token(&state, &raw).await?;
+    let (id, _, _, from) = lock_changeable(&mut tx, &raw, true).await?;
     sqlx::query("UPDATE bookings SET status = 'cancelled' WHERE id = $1")
-        .bind(current.0)
+        .bind(id)
         .execute(&mut *tx)
         .await?;
+    audit::record(
+        &mut tx,
+        tenant_id,
+        Actor::Customer,
+        "booking.cancelled",
+        "booking",
+        Some(id),
+        json!({ "from": from, "to": BookingStatus::Cancelled }),
+    )
+    .await?;
     let view = load_by_token(&mut tx, &raw).await?;
     tx.commit().await?;
     Ok(Json(view))
@@ -416,11 +463,22 @@ async fn reschedule_booking(
     Json(req): Json<RescheduleRequest>,
 ) -> Result<Json<PublicBooking>, AppError> {
     let (mut tx, tenant_id, tz) = open_by_token(&state, &raw).await?;
-    let (id, service_id, staff_id) = lock_changeable(&mut tx, &raw, false).await?;
+    let (id, service_id, staff_id, _) = lock_changeable(&mut tx, &raw, false).await?;
     let service = booking::active_service(&mut tx, service_id).await?;
-    booking::reschedule_booking(&mut tx, tenant_id, tz, id, &service, staff_id, req.start)
-        .await
-        .map_err(hide_plan_details)?;
+    let old_start =
+        booking::reschedule_booking(&mut tx, tenant_id, tz, id, &service, staff_id, req.start)
+            .await
+            .map_err(hide_plan_details)?;
+    audit::record(
+        &mut tx,
+        tenant_id,
+        Actor::Customer,
+        "booking.rescheduled",
+        "booking",
+        Some(id),
+        json!({ "from_starts_at": old_start, "to_starts_at": req.start }),
+    )
+    .await?;
     let view = load_by_token(&mut tx, &raw).await?;
     tx.commit().await?;
     Ok(Json(view))
@@ -432,7 +490,7 @@ async fn lock_changeable(
     tx: &mut Tx,
     raw: &str,
     allow_pending: bool,
-) -> Result<(Uuid, Uuid, Uuid), AppError> {
+) -> Result<(Uuid, Uuid, Uuid, BookingStatus), AppError> {
     let row: Option<(Uuid, Uuid, Uuid, BookingStatus, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, service_id, staff_user_id, status, starts_at FROM bookings
          WHERE manage_token_hash = $1 FOR UPDATE",
@@ -449,5 +507,5 @@ async fn lock_changeable(
     if starts_at <= Utc::now() {
         return Err(AppError::Conflict("預約已開始,無法變更".into()));
     }
-    Ok((id, service_id, staff_id))
+    Ok((id, service_id, staff_id, status))
 }

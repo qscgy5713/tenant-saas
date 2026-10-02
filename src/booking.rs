@@ -371,6 +371,7 @@ pub async fn reschedule_booking(
     staff_id: Uuid,
     new_start: DateTime<Utc>,
 ) -> Result<DateTime<Utc>, AppError> {
+    // 回傳改期前的開始時間(寫進稽核)
     check_start_in_window(new_start)?;
 
     // 改到不同的月份就等於在那個月多占一個名額,不能用改期繞過每月上限
@@ -396,7 +397,7 @@ pub async fn reschedule_booking(
         .execute(&mut **tx)
         .await;
     match result {
-        Ok(_) => Ok(new_end),
+        Ok(_) => Ok(old_start),
         Err(e) if pg_code(&e).as_deref() == Some(PG_EXCLUSION_VIOLATION) => Err(
             AppError::Conflict("該時段剛被預約走了,請選擇其他時間".into()),
         ),

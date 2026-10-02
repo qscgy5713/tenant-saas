@@ -132,3 +132,47 @@ async fn expired_token_is_rejected(pool: PgPool) {
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[sqlx::test]
+async fn login_and_register_are_rate_limited_per_client(pool: PgPool) {
+    let app = common::app_with_auth_limit(pool, 3);
+    register(&app, "a@example.com", "password123").await; // 第 1 次(註冊也算)
+
+    // 第 2、3 次:密碼錯誤,正常回 401
+    for _ in 0..2 {
+        let (status, _) = call(
+            &app,
+            Method::POST,
+            "/auth/login",
+            Some(json!({"email": "a@example.com", "password": "wrong-password"})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // 超過上限:連正確密碼也被擋(這就是限流的目的:不讓攻擊者無限猜)
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/auth/login",
+        Some(json!({"email": "a@example.com", "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        register(&app, "b@example.com", "password123").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    // 已登入後的其他端點不受影響
+    assert_eq!(
+        call(&app, Method::GET, "/health", None, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, Method::GET, "/auth/me", None, None).await.0,
+        StatusCode::UNAUTHORIZED,
+        "me 沒被限流(回 401 而非 429)"
+    );
+}
