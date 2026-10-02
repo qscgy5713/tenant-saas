@@ -1,7 +1,7 @@
-# 顧客預約頁(前端)
+# 前端(顧客預約頁 + 店家後台)
 
 React 19 + TypeScript + Vite。給店家的顧客用:選服務 → 選日期時間 → 填資料 → 收信確認 → 管理預約(確認 / 改期 / 取消)。
-**只有顧客端**;店家後台(登入、服務與營業時間設定、預約列表…)尚未開發。
+店家後台在 `/admin`,是獨立的程式碼 chunk(`React.lazy`),顧客的預約頁不會下載它。
 
 ## 開發
 ```bash
@@ -31,6 +31,14 @@ cd web && npm install && npm run dev   # http://127.0.0.1:5173/s/demo-salon
 | `/s/:slug` | 店家的服務列表 |
 | `/s/:slug/book/:serviceId` | 選人員(多位時)、日期、時間 → 填資料 → 「請到信箱確認」 |
 | `/bookings/:token` | 信中的連結:確認 / 改期 / 取消。**確認要按按鈕才送出**(信件掃描器會自動點開連結) |
+| `/admin/login`、`/admin/register` | 店家後台的登入 / 註冊 |
+| `/admin` | 我的店家(選擇或建立) |
+| `/admin/:slug` | 總覽(今天的行程、待確認、本月用量) |
+| `/admin/:slug/bookings` | 預約:依日期 / 待確認 / 近 30 天、代客預約、取消、完成 / 未到、備註 |
+| `/admin/:slug/services` | 服務(新增、編輯、啟用 / 停用、刪除) |
+| `/admin/:slug/team`、`team/:userId` | 團隊(邀請、角色、移除);成員的營業時間、可提供的服務、休假 |
+| `/admin/:slug/audit`、`plan` | 稽核日誌、方案與用量(僅擁有者 / 管理者) |
+| `/invitations/accept#token=…` | 邀請信的連結:登入或註冊後接受邀請 |
 
 ## 設計重點
 - **時間一律以店家時區顯示**,不是瀏覽器的時區;日期用 `YYYY-MM-DD` 字串表示店家當地的日曆日,避免 `Date` 在不同時區解讀出不同的日子(`src/lib/time.ts`)。
@@ -42,3 +50,12 @@ cd web && npm install && npm run dev   # http://127.0.0.1:5173/s/demo-salon
 - 沒有照片時,店家標題區用漸層 + 店名縮寫頭像;服務人員同樣用縮寫頭像(顏色由名字決定,同名永遠同色)。圖示是內建的 SVG,不引入圖示套件。
 - 頭像的顏色與尺寸都用 class,不用行內 `style`(正式環境的 CSP 是 `style-src 'self'`)。
 - 價格:後端只有 `price_cents`,沒有幣別,目前一律以新台幣顯示。
+
+## 後台的設計重點
+- **登入狀態**存在 `localStorage`(重新整理 / 新分頁仍保持登入),另一個分頁登出會同步。取捨:`localStorage` 可被頁面內的 XSS 讀到,所以用嚴格的 CSP 降低風險;更徹底的做法是 httpOnly cookie,需要後端配合,尚未做。
+- **登出、登入過期、後端回 401** 都會清掉所有快取,下一位在同一台電腦登入的人看不到上一位的資料。
+- **登入後只會回到站內的 `/admin`、`/invitations` 路徑**(防開放式重新導向)。
+- **邀請連結的 token 放在 `#` 之後**(`/invitations/accept#token=…`):瀏覽器不會把 `#` 後面的內容送到任何伺服器,不會出現在存取紀錄或 Referer。
+- **權限只決定「要不要顯示」**:員工看不到稽核 / 方案的入口,直接輸入網址會看到「沒有權限」,而且根本不會打那兩支 API;真正的檢查一律在後端。
+- **CSP**:正式環境是 `style-src 'self'; script-src 'self'`,**行內 `style` 屬性會被擋掉**(開發環境的 Vite 沒有這個限制,所以「開發時正常、上線後壞掉」)。`src/csp.test.ts` 會在測試時掃描並擋下行內 style、行內 script、`eval`、`dangerouslySetInnerHTML`。
+- 時間輸入(營業時間、休假)一律以店家時區解讀;`lib/time.ts` 的 `zonedToUtc` 處理夏令時間(跳時取跳完後的第一個瞬間、回撥取較早的,與後端規則一致)。

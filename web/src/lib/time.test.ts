@@ -99,3 +99,94 @@ describe('periodOf:上午 / 下午 / 晚上', () => {
     expect(at(0)).toBeDefined()
   })
 })
+
+import { dayRange, startOfDay, toLocalInputs, weekdayIndex, zonedToUtc } from './time'
+
+describe('zonedToUtc / startOfDay:店家當地時間 → UTC', () => {
+  it('台北(UTC+8,無夏令時間)', () => {
+    expect(zonedToUtc('2026-10-05', '10:30', TAIPEI).toISOString()).toBe('2026-10-05T02:30:00.000Z')
+    expect(startOfDay('2026-10-05', TAIPEI).toISOString()).toBe('2026-10-04T16:00:00.000Z')
+  })
+
+  it('跨日:台北 00:00 在 UTC 是前一天', () => {
+    expect(zonedToUtc('2026-01-01', '00:00', TAIPEI).toISOString()).toBe('2025-12-31T16:00:00.000Z')
+  })
+
+  it('偏移大的時區都正確(奧克蘭 +13、洛杉磯 -7、加拉巴哥群島 -6)', () => {
+    expect(zonedToUtc('2026-10-05', '12:00', 'Pacific/Auckland').toISOString()).toBe(
+      '2026-10-04T23:00:00.000Z',
+    )
+    expect(zonedToUtc('2026-10-05', '12:00', 'America/Los_Angeles').toISOString()).toBe(
+      '2026-10-05T19:00:00.000Z',
+    )
+    expect(zonedToUtc('2026-10-05', '23:59', 'Pacific/Kiritimati').toISOString()).toBe(
+      '2026-10-05T09:59:00.000Z',
+    ) // UTC+14
+  })
+
+  it('夏令時間跳時:不存在的 02:30 → 跳完之後的第一個瞬間(03:00 EDT = 07:00Z)', () => {
+    expect(zonedToUtc('2026-03-08', '02:30', 'America/New_York').toISOString()).toBe(
+      '2026-03-08T07:00:00.000Z',
+    )
+    expect(zonedToUtc('2026-03-08', '01:59', 'America/New_York').toISOString()).toBe(
+      '2026-03-08T06:59:00.000Z',
+    )
+  })
+
+  it('夏令時間回撥:重複的 01:30 → 較早的那一個(EDT = 05:30Z),與後端規則一致', () => {
+    expect(zonedToUtc('2026-11-01', '01:30', 'America/New_York').toISOString()).toBe(
+      '2026-11-01T05:30:00.000Z',
+    )
+    expect(zonedToUtc('2026-11-01', '02:00', 'America/New_York').toISOString()).toBe(
+      '2026-11-01T07:00:00.000Z',
+    )
+  })
+
+  it('與 ymdInTz / formatTime 互為反函數', () => {
+    for (const tz of [
+      TAIPEI,
+      'America/New_York',
+      'Europe/London',
+      'Pacific/Auckland',
+      'Asia/Kolkata',
+    ]) {
+      const t = zonedToUtc('2026-06-15', '09:45', tz).toISOString()
+      expect(ymdInTz(t, tz)).toBe('2026-06-15')
+      expect(formatTime(t, tz)).toBe('09:45')
+    }
+  })
+})
+
+describe('dayRange', () => {
+  it('一般的一天 24 小時', () => {
+    const { from, to } = dayRange('2026-10-05', TAIPEI)
+    expect(from).toBe('2026-10-04T16:00:00.000Z')
+    expect(Date.parse(to) - Date.parse(from)).toBe(24 * 3_600_000)
+  })
+
+  it('夏令時間當天只有 23 小時(跳時)/ 25 小時(回撥)', () => {
+    const spring = dayRange('2026-03-08', 'America/New_York')
+    expect((Date.parse(spring.to) - Date.parse(spring.from)) / 3_600_000).toBe(23)
+    const fall = dayRange('2026-11-01', 'America/New_York')
+    expect((Date.parse(fall.to) - Date.parse(fall.from)) / 3_600_000).toBe(25)
+  })
+
+  it('相鄰兩天的區間剛好銜接,不重疊也不遺漏', () => {
+    expect(dayRange('2026-10-05', TAIPEI).to).toBe(dayRange('2026-10-06', TAIPEI).from)
+  })
+})
+
+describe('toLocalInputs / weekdayIndex', () => {
+  it('UTC 瞬間 → 店家當地的日期與時間', () => {
+    expect(toLocalInputs('2026-10-05T16:30:00Z', TAIPEI)).toEqual({
+      ymd: '2026-10-06',
+      hhmm: '00:30',
+    })
+  })
+
+  it('星期:0 = 週日', () => {
+    expect(weekdayIndex('2026-10-04')).toBe(0)
+    expect(weekdayIndex('2026-10-05')).toBe(1)
+    expect(weekdayIndex('2026-10-10')).toBe(6)
+  })
+})

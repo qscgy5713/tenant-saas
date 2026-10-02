@@ -116,3 +116,71 @@ export function periodOf(instant: string, timeZone: string): DayPeriod {
   if (hour < 18) return 'afternoon'
   return 'evening'
 }
+
+// ---------- 店家當地時間 ↔ UTC ----------
+// 後台要把「店家當地的 10:30」或「店家當地的某一天」換成 UTC 時間點,
+// 用二分搜尋找出「當地時鐘第一次到達該時刻」的瞬間,自然處理夏令時間:
+//  - 跳時造成不存在的時刻 → 取跳完之後的第一個瞬間
+//  - 回撥造成重複的時刻 → 取較早的那一個(與後端 availability.rs 的規則一致)
+
+const wallFormatters = new Map<string, Intl.DateTimeFormat>()
+
+/** 某瞬間在指定時區的牆上時鐘,'YYYY-MM-DDTHH:MM'(字串可直接比較先後) */
+function wallClock(ms: number, timeZone: string): string {
+  let fmt = wallFormatters.get(timeZone)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+    wallFormatters.set(timeZone, fmt)
+  }
+  const p = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((x) => [x.type, x.value]))
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`
+}
+
+/** 店家當地的 `ymd` `hhmm`(例如 '2026-10-05'、'10:30')是哪個 UTC 瞬間 */
+export function zonedToUtc(ymd: string, hhmm: string, timeZone: string): Date {
+  const [y, m, d] = parseYmd(ymd)
+  const target = `${ymd}T${hhmm}`
+  const base = Date.UTC(y, m - 1, d)
+  // 所有時區的偏移都在 -12 … +14 小時之間,答案一定落在這個範圍內
+  let lo = base - 15 * 3_600_000 // 此時當地時鐘一定早於 target
+  let hi = base + 40 * 3_600_000 // 此時當地時鐘一定晚於 target(涵蓋當天的任何時刻)
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2)
+    if (wallClock(mid, timeZone) >= target) hi = mid
+    else lo = mid
+  }
+  return new Date(hi)
+}
+
+/** 店家當地某一天 00:00 的 UTC 瞬間 */
+export function startOfDay(ymd: string, timeZone: string): Date {
+  return zonedToUtc(ymd, '00:00', timeZone)
+}
+
+/** 店家當地某一天的 [開始, 結束) 區間(結束是隔天 00:00),ISO 字串 */
+export function dayRange(ymd: string, timeZone: string): { from: string; to: string } {
+  return {
+    from: startOfDay(ymd, timeZone).toISOString(),
+    to: startOfDay(addDays(ymd, 1), timeZone).toISOString(),
+  }
+}
+
+/** 把 UTC 瞬間拆成店家當地的日期與時間,給 <input type="date"> / <input type="time"> 用 */
+export function toLocalInputs(instant: string, timeZone: string): { ymd: string; hhmm: string } {
+  const [ymd, hhmm] = wallClock(new Date(instant).getTime(), timeZone).split('T')
+  return { ymd, hhmm }
+}
+
+/** 當地日期的星期,0 = 週日(與後端 working_hours.weekday 一致) */
+export function weekdayIndex(ymd: string): number {
+  const [y, m, d] = parseYmd(ymd)
+  return new Date(Date.UTC(y, m - 1, d, 12)).getUTCDay()
+}

@@ -2,14 +2,18 @@
 """開發用:透過 API 建立示範店家 demo-salon(2 位美髮師、3 項服務、每天營業)。
 
 只用標準函式庫,只打 HTTP API,不碰資料庫。可重複執行(已存在就跳過)。
-    python3 scripts/seed_demo.py [http://127.0.0.1:3001]
+    python3 scripts/seed_demo.py [http://127.0.0.1:3001] [--with-bookings]
+
+--with-bookings:再建立幾筆預約(今天、明天,以及一筆待確認),方便看後台的畫面。
 """
 import json
 import sys
 import urllib.error
 import urllib.request
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:3001"
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+BASE = ARGS[0] if ARGS else "http://127.0.0.1:3001"
+WITH_BOOKINGS = "--with-bookings" in sys.argv
 SLUG = "demo-salon"
 PASSWORD = "demo-password-123"
 OWNER = "owner@demo.example.com"
@@ -64,3 +68,46 @@ else:
     print("店家已存在,略過:", status, body and body.get("error"))
 
 print(f"\n預約頁:/s/{SLUG}\n員工登入:{OWNER} / {PASSWORD}")
+
+
+if WITH_BOOKINGS:
+    import datetime
+
+    status, services = call("GET", f"/public/shops/{SLUG}/services")
+    assert status == 200
+    by_name = {x["name"]: x["id"] for x in services}
+    today = datetime.date.today()
+    created = 0
+    customers = [
+        ("王小明", "ming@customer.example.com", "0912-345-678"),
+        ("李小華", "hua@customer.example.com", None),
+        ("張大偉", "wei@customer.example.com", "0922-111-222"),
+        ("陳雅婷", "ting@customer.example.com", "0933-555-666"),
+    ]
+    plan = [("剪髮", 0), ("洗髮護理", 0), ("染髮", 1), ("剪髮", 1)]
+    for (name, email, phone), (service, offset) in zip(customers, plan):
+        day = (today + datetime.timedelta(days=offset)).isoformat()
+        status, av = call("GET", f"/public/shops/{SLUG}/availability?service_id={by_name[service]}&from={day}&to={day}")
+        slots = av["slots"] if status == 200 else []
+        if not slots:
+            continue
+        slot = slots[min(len(slots) - 1, 4 * (created + 1))]
+        body = {"service_id": by_name[service], "start": slot["start"], "customer": {"name": name, "email": email}}
+        if phone:
+            body["customer"]["phone"] = phone
+        status, _ = call("POST", f"/t/{SLUG}/bookings", body, owner_token)
+        created += status == 201
+    # 一筆顧客自助的待確認申請(沒有按信中的連結,所以是 pending)。
+    # 找第一個有空檔的日子:店家週日不營業,固定加幾天可能剛好落在週日
+    pending = 0
+    for offset in range(2, 10):
+        day = (today + datetime.timedelta(days=offset)).isoformat()
+        status, av = call("GET", f"/public/shops/{SLUG}/availability?service_id={by_name['剪髮']}&from={day}&to={day}")
+        if status == 200 and len(av["slots"]) > 6:
+            status, _ = call("POST", f"/public/shops/{SLUG}/bookings", {
+                "service_id": by_name["剪髮"], "start": av["slots"][6]["start"],
+                "customer": {"name": "黃小芳", "email": "fang@customer.example.com"},
+            })
+            pending = int(status == 201)
+            break
+    print(f"已建立 {created} 筆預約、{pending} 筆待確認")

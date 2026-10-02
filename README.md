@@ -11,7 +11,7 @@
 - [deployment.md](docs/deployment.md):**部署指南**(資料庫角色、步驟、環境變數、監控、上線前檢查表)
 
 ## 狀態
-M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁(`web/`),尚無店家後台;尚未串接 Stripe。** 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。尚未串接 Stripe,方案只能由營運人員改資料庫。
+M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁與店家後台(`web/`);尚未串接 Stripe,方案只能由營運人員改資料庫。** 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。
 
 ## 快速開始
 ```
@@ -22,8 +22,11 @@ curl 127.0.0.1:3001/health
 ```
 
 ## 前端
-`web/` 是顧客預約頁(React + TypeScript + Vite):選服務、選日期時間、Email 確認、管理預約(改期 / 取消)。
-開發方式見 [web/README.md](web/README.md)。示範店家:`python3 scripts/seed_demo.py` 後打開 `/s/demo-salon`。
+`web/` 是前端(React + TypeScript + Vite),分兩部分:
+- **顧客預約頁**(`/s/:slug`):選服務、選日期時間、Email 確認、管理預約(改期 / 取消)。
+- **店家後台**(`/admin`):登入 / 註冊、建店、預約(依日期 / 待確認 / 近 30 天、代客預約、取消、完成 / 未到、備註)、服務、團隊(邀請、角色、移除)、成員的營業時間 / 可提供的服務 / 休假、稽核日誌、方案與用量。後台是獨立的程式碼 chunk,顧客不會下載。
+
+開發方式見 [web/README.md](web/README.md)。示範資料:`python3 scripts/seed_demo.py --with-bookings`,顧客頁 `/s/demo-salon`,後台 `/admin`(`owner@demo.example.com` / `demo-password-123`)。
 
 ## 目前的 API
 | 方法 | 路徑 | 說明 |

@@ -1,0 +1,127 @@
+import type { AuditEntry } from '../admin/types'
+import { formatDateTime } from './time'
+
+const ACTION_LABEL: Record<string, string> = {
+  'tenant.created': '建立店家',
+  'service.created': '新增服務',
+  'service.updated': '修改服務',
+  'service.deleted': '刪除服務',
+  'member.services_replaced': '更新可提供的服務',
+  'member.working_hours_replaced': '更新營業時間',
+  'member.role_changed': '變更角色',
+  'member.removed': '移除成員',
+  'member.left': '退出團隊',
+  'time_off.created': '新增休假',
+  'time_off.deleted': '刪除休假',
+  'invitation.created': '發出邀請',
+  'invitation.revoked': '撤銷邀請',
+  'invitation.accepted': '接受邀請',
+  'booking.created': '建立預約(店家代客)',
+  'booking.requested': '顧客提出預約申請',
+  'booking.confirmed': '顧客確認預約',
+  'booking.rescheduled': '預約改期',
+  'booking.cancelled': '取消預約',
+  'booking.completed': '標記為已完成',
+  'booking.no_show': '標記為未到',
+  'booking.notes_updated': '更新預約備註',
+}
+
+const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }
+const STATUS: Record<string, string> = {
+  pending: '待確認',
+  confirmed: '已確認',
+  cancelled: '已取消',
+  completed: '已完成',
+  no_show: '未到',
+}
+const CANCEL_REASON: Record<string, string> = {
+  monthly_limit: '本月預約已額滿',
+  no_longer_bookable: '確認時該時段已無法預約',
+  slot_taken: '時段已被搶先預約',
+  confirmation_expired: '超過期限未確認',
+}
+const FIELD: Record<string, string> = {
+  name: '名稱',
+  duration_minutes: '時長',
+  price_cents: '價格',
+  active: '啟用狀態',
+}
+
+/** 未知的動作(後端新增、前端還沒翻譯)原樣顯示,不要壞掉 */
+export function actionLabel(action: string): string {
+  return ACTION_LABEL[action] ?? action
+}
+
+export function actorLabel(entry: AuditEntry): string {
+  if (entry.actor_type === 'customer') return '顧客'
+  if (entry.actor_type === 'system') return '系統'
+  return entry.actor_name ?? '已離開的成員'
+}
+
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+const num = (v: unknown): number | null => (typeof v === 'number' ? v : null)
+
+/** 一行白話的細節說明,沒有可說的就回傳 null。detail 的格式見 src/audit.rs 與各 handler,刻意不含個資。 */
+export function describeDetail(entry: AuditEntry, timeZone: string): string | null {
+  const d = entry.detail
+  switch (entry.action) {
+    case 'tenant.created':
+      return str(d.slug) ? `預約頁代稱:${str(d.slug)}` : null
+    case 'service.created':
+      return num(d.duration_minutes) !== null
+        ? `${num(d.duration_minutes)} 分鐘、${(num(d.price_cents) ?? 0) / 100} 元`
+        : null
+    case 'service.updated': {
+      const changed = d.changed
+      if (!changed || typeof changed !== 'object') return null
+      const parts = Object.entries(changed as Record<string, unknown>).map(([k, v]) => {
+        const label = FIELD[k] ?? k
+        if (k === 'price_cents') return `${label} → ${(num(v) ?? 0) / 100} 元`
+        if (k === 'active') return `${label} → ${v ? '啟用' : '停用'}`
+        if (k === 'duration_minutes') return `${label} → ${v} 分鐘`
+        return `${label} → ${String(v)}`
+      })
+      return parts.length ? parts.join('、') : null
+    }
+    case 'member.role_changed':
+      return `${ROLE[str(d.from) ?? ''] ?? d.from} → ${ROLE[str(d.to) ?? ''] ?? d.to}`
+    case 'member.removed':
+      return str(d.role) ? `角色:${ROLE[str(d.role)!] ?? d.role}` : null
+    case 'invitation.created':
+    case 'invitation.revoked':
+    case 'invitation.accepted':
+      return str(d.role) ? `角色:${ROLE[str(d.role)!] ?? d.role}` : null
+    case 'member.services_replaced':
+      return num(d.count) !== null ? `共 ${num(d.count)} 項服務` : null
+    case 'member.working_hours_replaced':
+      return num(d.entries) !== null ? `共 ${num(d.entries)} 個時段` : null
+    case 'booking.created':
+    case 'booking.requested':
+      return str(d.starts_at) ? `預約時間:${formatDateTime(str(d.starts_at)!, timeZone)}` : null
+    case 'booking.rescheduled':
+      return str(d.from_starts_at) && str(d.to_starts_at)
+        ? `${formatDateTime(str(d.from_starts_at)!, timeZone)} → ${formatDateTime(str(d.to_starts_at)!, timeZone)}`
+        : null
+    case 'booking.cancelled': {
+      const reason = str(d.reason)
+      const from = str(d.from)
+      if (reason) return CANCEL_REASON[reason] ?? reason
+      return from ? `原狀態:${STATUS[from] ?? from}` : null
+    }
+    case 'booking.completed':
+    case 'booking.no_show':
+      return null
+    default:
+      return null
+  }
+}
+
+/** 篩選用的動作前綴 */
+export const AUDIT_FILTERS: { value: string; label: string }[] = [
+  { value: '', label: '全部' },
+  { value: 'booking.', label: '預約' },
+  { value: 'service.', label: '服務' },
+  { value: 'member.', label: '成員' },
+  { value: 'invitation.', label: '邀請' },
+  { value: 'time_off.', label: '休假' },
+]

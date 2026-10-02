@@ -37,3 +37,30 @@ export function validateCustomer(form: CustomerForm): CustomerErrors {
   if ([...phone].length > 30) errors.phone = '電話最多 30 字'
   return errors
 }
+
+// 與後端 src/routes/tenants.rs 的 validate_slug 一致
+const RESERVED_SLUGS = ['www', 'api', 'app', 'admin', 'static', 'assets', 'mail', 'public']
+
+export function validateSlug(raw: string): string | null {
+  const slug = raw.trim()
+  if (!slug) return '請輸入預約頁網址代稱'
+  if (slug.length < 3 || slug.length > 40) return '網址代稱需為 3–40 個字'
+  if (!/^[a-z0-9-]+$/.test(slug)) return '只能使用小寫英文字母、數字與連字號(-)'
+  if (slug.startsWith('-') || slug.endsWith('-')) return '不能以連字號開頭或結尾'
+  if (RESERVED_SLUGS.includes(slug)) return '這個代稱是保留字,請換一個'
+  return null
+}
+
+export function validatePassword(password: string): string | null {
+  const length = [...password].length
+  if (length < 8) return '密碼至少 8 個字'
+  if (length > 128) return '密碼最多 128 個字'
+  return null
+}
+
+export function validateName(raw: string, label = '名稱', max = 100): string | null {
+  const name = raw.trim()
+  if (!name) return `請輸入${label}`
+  if ([...name].length > max) return `${label}最多 ${max} 字`
+  return null
+}
