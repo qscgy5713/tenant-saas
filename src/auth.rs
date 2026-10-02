@@ -1,0 +1,125 @@
+use std::sync::LazyLock;
+
+use anyhow::{Context, anyhow};
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
+};
+use axum::{extract::FromRequestParts, http::request::Parts};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{config::Config, error::AppError, routes::AppState};
+
+#[derive(Clone)]
+pub struct JwtKeys {
+    encoding: EncodingKey,
+    decoding: DecodingKey,
+    ttl_secs: u64,
+}
+
+impl JwtKeys {
+    pub fn new(config: &Config) -> Self {
+        let secret = config.jwt_secret.as_bytes();
+        Self {
+            encoding: EncodingKey::from_secret(secret),
+            decoding: DecodingKey::from_secret(secret),
+            ttl_secs: config.jwt_ttl_secs,
+        }
+    }
+
+    pub fn issue(&self, user_id: Uuid) -> Result<String, AppError> {
+        self.issue_at(user_id, jsonwebtoken::get_current_timestamp())
+    }
+
+    /// 指定簽發時間,方便測試過期情境。
+    pub fn issue_at(&self, user_id: Uuid, now: u64) -> Result<String, AppError> {
+        let claims = Claims {
+            sub: user_id,
+            iat: now,
+            exp: now + self.ttl_secs,
+        };
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .context("簽發 JWT 失敗")
+            .map_err(AppError::from)
+    }
+
+    fn verify(&self, token: &str) -> Result<Claims, AppError> {
+        let validation = Validation::new(Algorithm::HS256);
+        decode::<Claims>(token, &self.decoding, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| AppError::Unauthorized)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: Uuid,
+    iat: u64,
+    exp: u64,
+}
+
+/// 通過 JWT 驗證的使用者。租戶不放在 token 內,之後每個請求另外驗證成員資格。
+#[derive(Debug, Clone, Copy)]
+pub struct AuthUser {
+    pub id: Uuid,
+}
+
+impl FromRequestParts<AppState> for AuthUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::Unauthorized)?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or(AppError::Unauthorized)?;
+        let claims = state.jwt.verify(token)?;
+        Ok(AuthUser { id: claims.sub })
+    }
+}
+
+pub async fn hash_password(password: String) -> Result<String, AppError> {
+    tokio::task::spawn_blocking(move || {
+        Argon2::default()
+            .hash_password(password.as_bytes())
+            .map(|hash| hash.to_string())
+            .map_err(|e| anyhow!("密碼雜湊失敗: {e}"))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.into()))?
+    .map_err(AppError::Internal)
+}
+
+pub async fn verify_password(password: String, hash: String) -> bool {
+    tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&hash)
+            .map(|parsed| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &parsed)
+                    .is_ok()
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// 帳號不存在時也對這個假雜湊做一次驗證,讓回應時間與「密碼錯誤」接近,避免洩漏哪些 Email 已註冊。
+static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
+    Argon2::default()
+        .hash_password(b"dummy-password-for-timing")
+        .expect("產生假雜湊失敗")
+        .to_string()
+});
+
+pub async fn verify_dummy(password: String) {
+    verify_password(password, DUMMY_HASH.clone()).await;
+}
