@@ -15,6 +15,8 @@ pub enum AppError {
     Forbidden,
     #[error("找不到資源")]
     NotFound,
+    #[error("請求過於頻繁,請稍後再試")]
+    TooManyRequests,
     #[error("{0}")]
     Conflict(String),
     #[error("內部錯誤")]
@@ -40,6 +42,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, "內部錯誤");

@@ -29,6 +29,24 @@ pub async fn begin_scoped(
     Ok(tx)
 }
 
+/// 背景 worker 用:切成 `tenant_worker` 角色(跨租戶,但只有明確授權的資料表)
+pub async fn begin_worker(pool: &PgPool) -> Result<Tx, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE tenant_worker")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// 公開端點用:先以 SECURITY DEFINER 函式解析出租戶 id,再在同一交易內補設租戶上下文
+pub async fn set_tenant(tx: &mut Tx, tenant_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 pub const PG_UNIQUE_VIOLATION: &str = "23505";
 pub const PG_FOREIGN_KEY_VIOLATION: &str = "23503";
 pub const PG_EXCLUSION_VIOLATION: &str = "23P01";

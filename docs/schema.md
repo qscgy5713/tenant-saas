@@ -164,7 +164,9 @@ CREATE TABLE customers (
 );
 ```
 
-## 預約(核心)
+## 預約(核心,已實作於 `0006_bookings.sql`)
+
+與實作的差異:`manage_token_hash` 已實作;`bookings` 對員工 / 服務 / 顧客的外鍵**沒有** `ON DELETE CASCADE`,有預約紀錄的服務或成員無法直接刪除(API 回 409),避免靜默刪掉歷史資料。`tenant_app` 對 `bookings` 只有 SELECT / INSERT / UPDATE,沒有 DELETE。
 
 ```sql
 CREATE TYPE booking_status AS ENUM ('confirmed', 'cancelled', 'completed', 'no_show');
@@ -263,3 +265,9 @@ CREATE POLICY tenant_isolation ON services
 4. **預約不設緩衝時間**(服務之間不留空檔),之後需要再加。
 5. **平台超級管理員**(跨租戶後台)不在這一版,之後用獨立的資料庫角色與連線處理。
 6. **主鍵用 `gen_random_uuid()`(UUIDv4)**,若在意索引寫入效率,之後可改成應用層產生 UUIDv7。
+
+## 補充:M6 新增(`0007_jobs.sql`)
+- `booking_status` 新增 `pending`(顧客自助預約、尚未按確認連結;**不在排除約束的條件內,不占時段**)
+- `bookings.confirmed_at`(確認時間;提醒信規則用)、`bookings.reminder_queued_at`
+- `email_outbox`:`dedupe_key` 唯一,同一件事只排一封信;`tenant_app` 只有 SELECT / INSERT(請求內只能排信,不能改或刪)
+- 角色 `tenant_worker`:`NOLOGIN NOBYPASSRLS`,明確授權 `email_outbox`(完整)、`bookings`(讀 / 更新)、`customers`、`services`、`tenants`(唯讀)、`users(id, name)`;對應的 RLS 政策都寫明 `TO tenant_worker`

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
-use tenant_saas::{config::Config, routes};
+use tenant_saas::{config::Config, mail::Mailer, routes, worker};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -21,12 +21,35 @@ async fn main() -> Result<()> {
         .await?;
     sqlx::migrate!("./migrations").run(&db).await?;
 
+    // 背景 worker:寄信、提醒、整理過期預約;收到關閉訊號時等它收尾
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let worker_handle = if config.worker_enabled {
+        let mailer = Mailer::from_config(&config)?;
+        Some(tokio::spawn(worker::run(
+            db.clone(),
+            mailer,
+            Duration::from_secs(config.worker_poll_secs),
+            shutdown_rx,
+        )))
+    } else {
+        tracing::warn!("WORKER_ENABLED=false:不會寄信,也不會整理過期預約");
+        None
+    };
+
     let app = routes::router(routes::AppState::new(db, &config));
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("監聽 {}", config.bind_addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
+
+    let _ = shutdown_tx.send(true);
+    if let Some(handle) = worker_handle {
+        let _ = handle.await;
+    }
     Ok(())
 }
 

@@ -9,7 +9,7 @@
 - [decisions.md](docs/decisions.md):設計決策紀錄
 
 ## 狀態
-M1–M5 完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理),下一步 M4.5 預約核心。
+M1–M6 完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信),下一步 M7 訂閱方案與限額。
 
 ## 快速開始
 ```
@@ -39,6 +39,30 @@ curl 127.0.0.1:3001/health
 | POST | `/invitations/accept` | 被邀請者以 token 加入店家(需登入且 Email 相符) |
 | PATCH | `/t/{slug}/members/{user_id}` | 改角色(僅 owner) |
 | DELETE | `/t/{slug}/members/{user_id}` | 移除成員 / 自己退出(owner 不可被移除) |
+
+### 公開預約(顧客,不需登入;有限流)
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/public/shops/{slug}` | 店家名稱與時區 |
+| GET | `/public/shops/{slug}/services` | 可預約的服務 |
+| GET | `/public/shops/{slug}/services/{id}/staff` | 提供該服務的員工 |
+| GET | `/public/shops/{slug}/availability?service_id=&from=&to=&staff_id=` | 可預約時段(日期為店家本地日期,一次最多 14 天) |
+| POST | `/public/shops/{slug}/bookings` | 提出預約申請(狀態 `pending`,**不占時段**),系統寄確認信;回應不含 token |
+| POST | `/public/bookings/{token}/confirm` | 按下信中連結後確認,此刻才占位 |
+| GET | `/public/bookings/{token}` | 查看預約(token 只寄到顧客信箱) |
+| POST | `/public/bookings/{token}/cancel`、`/reschedule` | 取消 / 改期 |
+
+### 員工端預約(需登入)
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET / POST | `/t/{slug}/bookings` | 列表(staff 只看自己的)/ 代客預約 |
+| PATCH | `/t/{slug}/bookings/{id}` | 改狀態(cancelled / completed / no_show)與備註 |
+
+## 寄信
+- 設定 `SMTP_URL`(例如 `smtps://user:pass@smtp.example.com:465`)與 `MAIL_FROM`,背景 worker 會寄出確認信、提醒信、邀請信。
+- 沒設 `SMTP_URL` 時是開發模式:信件(含連結)只印在日誌,不會真的寄出。
+- 本機收信測試:`docker compose up -d mailpit`,設 `SMTP_URL=smtp://127.0.0.1:1025`,信件看 http://127.0.0.1:8025。
+- `PUBLIC_BASE_URL` 是信中連結的前端網址;`WORKER_ENABLED=false` 可關閉 worker。
 
 ## 測試
 ```

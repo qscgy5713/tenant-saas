@@ -23,7 +23,9 @@ pub fn routes() -> Router<AppState> {
         .route("/t/{slug}/members", get(list_members))
 }
 
-const RESERVED_SLUGS: &[&str] = &["www", "api", "app", "admin", "static", "assets", "mail"];
+const RESERVED_SLUGS: &[&str] = &[
+    "www", "api", "app", "admin", "static", "assets", "mail", "public",
+];
 const PG_INVALID_PARAMETER: &str = "22023";
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +75,10 @@ async fn create_tenant(
         return Err(AppError::BadRequest("店家名稱長度需為 1–100 字".into()));
     }
     let timezone = req.timezone.unwrap_or_else(|| "Asia/Taipei".into());
+    // 排程計算用 IANA 時區資料庫,必須是程式也認得的名稱,否則之後每次算時段都會失敗
+    if timezone.parse::<chrono_tz::Tz>().is_err() {
+        return Err(AppError::BadRequest("不支援的時區".into()));
+    }
 
     let mut tx = begin_scoped(&state.db, Some(auth.id), None).await?;
     let result: Result<Uuid, sqlx::Error> = sqlx::query_scalar("SELECT create_tenant($1, $2, $3)")

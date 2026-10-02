@@ -13,6 +13,7 @@ use crate::{
     auth::{AuthUser, hash_password, verify_dummy, verify_password},
     db::PG_UNIQUE_VIOLATION,
     error::AppError,
+    validation::normalize_email,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -46,24 +47,6 @@ struct UserResponse {
 struct AuthResponse {
     token: String,
     user: UserResponse,
-}
-
-pub(super) fn normalize_email(raw: &str) -> Result<String, AppError> {
-    let email = raw.trim();
-    let valid = email.len() <= 254
-        && !email.chars().any(char::is_whitespace)
-        && email.split_once('@').is_some_and(|(local, domain)| {
-            !local.is_empty()
-                && domain.contains('.')
-                && !domain.starts_with('.')
-                && !domain.ends_with('.')
-                && !domain.contains('@')
-        });
-    if valid {
-        Ok(email.to_string())
-    } else {
-        Err(AppError::BadRequest("Email 格式不正確".into()))
-    }
 }
 
 async fn register(

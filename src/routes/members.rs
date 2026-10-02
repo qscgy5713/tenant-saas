@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -8,16 +6,18 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{AppState, auth::normalize_email};
+use super::AppState;
 use crate::{
     auth::AuthUser,
-    db::{PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
+    db::{PG_FOREIGN_KEY_VIOLATION, PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
     error::AppError,
+    mail, outbox,
     tenancy::{Role, TenantCtx},
+    token,
+    validation::normalize_email,
 };
 
 pub fn routes() -> Router<AppState> {
@@ -37,20 +37,6 @@ pub fn routes() -> Router<AppState> {
 const INVITATION_TTL_DAYS: i64 = 7;
 /// PostgreSQL `no_data_found`,accept_invitation 用來表示「邀請無效」
 const PG_NO_DATA_FOUND: &str = "P0002";
-
-/// 128 位元以上的隨機 token(兩個 UUIDv4 串接),以十六進位表示
-fn generate_token() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-}
-
-fn hash_token(token: &str) -> String {
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
-}
 
 // ---------- 邀請 ----------
 
@@ -102,7 +88,7 @@ async fn create_invitation(
         .execute(&mut *tx)
         .await?;
 
-    let token = generate_token();
+    let token = token::generate();
     let expires_at = Utc::now() + Duration::days(INVITATION_TTL_DAYS);
     let result = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO invitations (tenant_id, email, role, token_hash, expires_at)
@@ -111,7 +97,7 @@ async fn create_invitation(
     .bind(ctx.tenant_id)
     .bind(&email)
     .bind(req.role)
-    .bind(hash_token(&token))
+    .bind(token::hash(&token))
     .bind(expires_at)
     .fetch_one(&mut *tx)
     .await;
@@ -122,6 +108,23 @@ async fn create_invitation(
         }
         Err(e) => return Err(e.into()),
     };
+    let shop: String = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let role_label = match req.role {
+        Role::Manager => "管理者",
+        _ => "員工",
+    };
+    let link = mail::invitation_link(&state.public_base_url, &token);
+    let invite_mail = mail::invitation(&email, &shop, role_label, &link);
+    outbox::enqueue(
+        &mut tx,
+        ctx.tenant_id,
+        &invite_mail,
+        Some(&format!("invite:{id}")),
+    )
+    .await?;
     tx.commit().await?;
 
     Ok((
@@ -207,7 +210,7 @@ async fn accept_invitation(
     }
     let mut tx = begin_scoped(&state.db, Some(auth.id), None).await?;
     let result: Result<String, sqlx::Error> = sqlx::query_scalar("SELECT accept_invitation($1)")
-        .bind(hash_token(token))
+        .bind(token::hash(token))
         .fetch_one(&mut *tx)
         .await;
     let tenant_slug = match result {
@@ -287,10 +290,18 @@ async fn remove_member(
     if user_id != ctx.user_id && !ctx.role.can_manage(target) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM memberships WHERE user_id = $1")
+    let result = sqlx::query("DELETE FROM memberships WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
-        .await?;
+        .await;
+    match result {
+        Ok(_) => {}
+        // bookings 以外鍵參照員工,有預約紀錄的成員不能直接刪除
+        Err(e) if pg_code(&e).as_deref() == Some(PG_FOREIGN_KEY_VIOLATION) => {
+            return Err(AppError::Conflict("此成員有預約紀錄,無法移除".into()));
+        }
+        Err(e) => return Err(e.into()),
+    }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

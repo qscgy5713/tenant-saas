@@ -20,6 +20,13 @@ pub fn test_config(ttl: u64) -> Config {
         bind_addr: String::new(),
         jwt_secret: "test-secret-test-secret-test-secret-123".into(),
         jwt_ttl_secs: ttl,
+        public_rate_limit_per_min: 100_000,
+        trust_proxy: false,
+        smtp_url: None,
+        mail_from: "test <test@example.com>".into(),
+        public_base_url: "http://app.test".into(),
+        worker_enabled: false,
+        worker_poll_secs: 1,
     }
 }
 
@@ -118,4 +125,12 @@ pub async fn create_service(app: &Router, token: &str, slug: &str, name: &str) -
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     body
+}
+
+pub fn app_with_rate_limit(pool: PgPool, limit: u32) -> Router {
+    let config = Config {
+        public_rate_limit_per_min: limit,
+        ..test_config(3600)
+    };
+    routes::router(AppState::new(pool, &config))
 }

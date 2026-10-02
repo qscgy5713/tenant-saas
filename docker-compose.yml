@@ -20,5 +20,12 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
 
+  # 本機收信測試:SMTP 1025,網頁介面 http://127.0.0.1:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+
 volumes:
   pgdata:
