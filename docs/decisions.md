@@ -61,8 +61,13 @@
 ## 2026-10-02 背景 worker 的權限:獨立角色 `tenant_worker`
 - **原因**:worker 要跨租戶處理,但不該是超級使用者。它沒有 BYPASSRLS,只對需要的表有明確政策與權限(測試證明:讀不到 `password_hash`、不能刪預約、不能寫服務、讀不到 memberships)
 
+## 2026-10-02 顧客預約頁只做淺色主題
+- 原本跟隨系統的深色模式,使用者的電腦是深色,整個預約頁變成黑底,被要求改掉。對象是一般顧客,預約頁預設就該明亮、友善;`color-scheme: light` 也讓表單控制項不被系統強制變暗
+- 設計參考 Fresha、Square(白底卡片、大圓角、留白、單一強調色):沒有照片,所以用漸層標題區 + 店名縮寫頭像,並加上步驟指示
+- **可互動元件的邊框要夠深**:輸入框、時段、人員選擇的邊框原本與白底只有 1.64:1,WCAG 1.4.11 要求 ≥ 3:1;卡片、分隔線仍用柔和的邊框。停用的主按鈕改成淺灰底 + 深字(原本白字配灰綠只有 3.6:1,而那顆按鈕上的字是顧客要讀的提示)
+
 ## 2026-10-02 前端:React + TypeScript + Vite,放在同一個儲存庫的 `web/`
-- 使用者選定。React Query 管資料請求(快取、重試策略);React Router;沒有 UI 套件,自己寫 CSS(約 500 行,以 token 支援深色模式)——頁面少、設計要貼近參考產品,不值得為此引入元件庫
+- 使用者選定。React Query 管資料請求(快取、重試策略);React Router;沒有 UI 套件,自己寫 CSS(約 500 行,以 token 管理顏色)——頁面少、設計要貼近參考產品,不值得為此引入元件庫
 - **API 走同源 `/api/` 代理**(開發用 Vite、正式用 nginx,去掉前綴),所以後端不需要 CORS;之後若要前後端分網域再加
 - **時間一律以店家時區顯示**,日期用 `YYYY-MM-DD` 字串表示「店家當地的日曆日」。顧客約的是實體世界的時間,不是自己瀏覽器時區的時間
 - **確認預約必須按按鈕(POST)**,不在載入管理頁時自動送出:信件安全掃描器會先點開信中的連結
@@ -70,7 +75,8 @@
 - **5xx 不顯示後端內容**:只給固定訊息與 `X-Request-Id`,避免洩漏內部細節
 - 管理頁網址含 token:nginx 加 `Referrer-Policy: no-referrer`、`noindex`、`no-store`、嚴格 CSP、`frame-ancestors 'none'`
 - 先做顧客端:它是產品核心、後端公開 API 已齊全、也最適合對外展示;店家後台下一階段
-,runtime 碰不到租戶資料表
+
+## 2026-10-02 資料庫帳號:migrator / runtime 分離,runtime 碰不到租戶資料表
 - **原因**:超級使用者、BYPASSRLS、資料表擁有者都繞過 RLS。runtime 帳號 `NOINHERIT`,本身只有 `users`(註冊 / 登入)與 `plans` 的權限,租戶資料一律得先 `SET LOCAL ROLE tenant_app`。漏掉 `begin_scoped` 的程式碼會 permission denied(失敗即關閉),而不是悄悄越權
 - **啟動檢查**:`APP_ENV=production` 時帳號過大就拒絕啟動,而不是只在文件裡叮嚀
 - **migration 與 runtime 分帳號**:runtime 沒有建表 / 建角色權限,SQL injection 的破壞範圍小很多;`migrate` 是一次性命令,不在應用程式啟動時執行

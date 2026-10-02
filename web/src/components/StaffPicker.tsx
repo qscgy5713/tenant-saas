@@ -1,4 +1,6 @@
 import type { Staff } from '../api/types'
+import { Avatar } from './Avatar'
+import { UserIcon } from './Icons'
 
 /** 單選:null 代表「不指定」。用原生 radio,鍵盤與螢幕閱讀器自然可用 */
 export function StaffPicker({
@@ -26,6 +28,7 @@ export function StaffPicker({
               checked={value === o.id}
               onChange={() => onChange(o.id)}
             />
+            {o.id ? <Avatar name={o.label} size="sm" /> : <UserIcon width={18} height={18} />}
             <span>{o.label}</span>
           </label>
         ))}

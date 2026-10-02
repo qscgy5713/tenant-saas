@@ -1,4 +1,5 @@
 import { formatDuration, formatPrice } from '../lib/money'
+import { CalendarIcon } from './Icons'
 import { formatDateTime } from '../lib/time'
 import type { Service } from '../api/types'
 
@@ -15,7 +16,10 @@ export function SummaryCard({
 }) {
   return (
     <aside className="summary" aria-label="預約摘要">
-      <h2>預約摘要</h2>
+      <h2>
+        <CalendarIcon width={16} height={16} />
+        預約摘要
+      </h2>
       <dl>
         <div>
           <dt>服務</dt>
@@ -33,7 +37,11 @@ export function SummaryCard({
         <div>
           <dt>時間</dt>
           <dd>
-            {start ? formatDateTime(start, timezone) : <span className="muted">尚未選擇</span>}
+            {start ? (
+              <strong>{formatDateTime(start, timezone)}</strong>
+            ) : (
+              <span className="muted">尚未選擇</span>
+            )}
           </dd>
         </div>
       </dl>

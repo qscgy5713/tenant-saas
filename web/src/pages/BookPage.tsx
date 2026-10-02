@@ -6,6 +6,7 @@ import { useServices, useShop, useStaff } from '../api/queries'
 import { createBooking } from '../api/public'
 import type { BookingRequested } from '../api/types'
 import { DetailsForm } from '../components/DetailsForm'
+import { CheckIcon, MailIcon } from '../components/Icons'
 import { Shell } from '../components/Shell'
 import { SlotPicker } from '../components/SlotPicker'
 import { StaffPicker } from '../components/StaffPicker'
@@ -102,12 +103,14 @@ export function BookPage() {
   const conflict = submit.error instanceof ApiError && submit.error.status === 409
 
   return (
-    <Shell title={service.name} shopName={shop.data.name} shopSlug={slug}>
-      <nav className="crumbs" aria-label="預約步驟">
+    <Shell title={service.name} shopName={shop.data.name} shopSlug={slug} wide>
+      <nav className="crumbs" aria-label="導覽路徑">
         <Link to={`/s/${slug}`}>所有服務</Link>
         <span aria-hidden="true">/</span>
         <span aria-current="page">{service.name}</span>
       </nav>
+
+      <Stepper current={step} />
 
       <div className="flow">
         <div className="flow-main">
@@ -178,6 +181,9 @@ export function BookPage() {
 
           {step === 'sent' && sent && (
             <div className="sent">
+              <span className="sent-icon">
+                <MailIcon width={28} height={28} />
+              </span>
               <h1 className="page-title">請到信箱確認預約</h1>
               <Notice tone="warning">
                 <strong>預約尚未成立。</strong>時段在你確認之前不會保留。
@@ -208,5 +214,35 @@ export function BookPage() {
         </div>
       </div>
     </Shell>
+  )
+}
+
+const STEPS: { key: Step; label: string }[] = [
+  { key: 'time', label: '日期時間' },
+  { key: 'details', label: '聯絡資料' },
+  { key: 'sent', label: '信箱確認' },
+]
+
+/** 讓顧客知道自己在第幾步、還剩幾步 */
+function Stepper({ current }: { current: Step }) {
+  const currentIndex = STEPS.findIndex((s) => s.key === current)
+  return (
+    <ol className="stepper" aria-label="預約步驟">
+      {STEPS.map((step, i) => {
+        const state = i < currentIndex ? 'done' : i === currentIndex ? 'current' : 'todo'
+        return (
+          <li
+            key={step.key}
+            className={`step step-${state}`}
+            aria-current={state === 'current' ? 'step' : undefined}
+          >
+            <span className="step-dot">
+              {state === 'done' ? <CheckIcon width={14} height={14} /> : i + 1}
+            </span>
+            <span className="step-label">{step.label}</span>
+          </li>
+        )
+      })}
+    </ol>
   )
 }

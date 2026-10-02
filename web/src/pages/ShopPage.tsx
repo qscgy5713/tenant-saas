@@ -1,6 +1,8 @@
 import { Link, useParams } from 'react-router-dom'
 import { useServices, useShop } from '../api/queries'
 import { ErrorState, Loading } from '../components/States'
+import { Avatar } from '../components/Avatar'
+import { ArrowRightIcon, ClockIcon } from '../components/Icons'
 import { Shell } from '../components/Shell'
 import { formatDuration, formatPrice } from '../lib/money'
 import { ApiError } from '../api/client'
@@ -33,7 +35,20 @@ export function ShopPage() {
 
   return (
     <Shell title="選擇服務" shopName={shop.data.name} shopSlug={slug}>
-      <h1 className="page-title">選擇服務</h1>
+      <section className="hero">
+        <Avatar name={shop.data.name} size="lg" />
+        <div>
+          <h1>{shop.data.name}</h1>
+          <p className="hero-sub">選擇服務,挑一個方便的時間,幾個步驟就完成預約。</p>
+          <ul className="hero-chips" aria-label="預約說明">
+            <li>不用註冊</li>
+            <li>Email 確認</li>
+            <li>可線上改期</li>
+          </ul>
+        </div>
+      </section>
+
+      <h2 className="section-title">選擇服務</h2>
       {services.isPending && <Loading label="載入服務項目…" />}
       {services.isError && <ErrorState error={services.error} onRetry={() => services.refetch()} />}
       {services.data?.length === 0 && (
@@ -45,14 +60,17 @@ export function ShopPage() {
         {services.data?.map((service) => (
           <li key={service.id}>
             <Link to={`/s/${slug}/book/${service.id}`} className="card service-card">
-              <div>
-                <h2>{service.name}</h2>
-                <p className="muted">
-                  {formatDuration(service.duration_minutes)} · {formatPrice(service.price_cents)}
+              <div className="service-main">
+                <h3>{service.name}</h3>
+                <p className="service-meta">
+                  <ClockIcon width={15} height={15} />
+                  {formatDuration(service.duration_minutes)}
                 </p>
+                <p className="service-price">{formatPrice(service.price_cents)}</p>
               </div>
-              <span className="btn btn-secondary" aria-hidden="true">
+              <span className="btn btn-pill" aria-hidden="true">
                 預約
+                <ArrowRightIcon width={16} height={16} />
               </span>
             </Link>
           </li>

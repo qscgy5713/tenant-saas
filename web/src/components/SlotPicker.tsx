@@ -13,6 +13,7 @@ import {
   tzLabel,
   weekdayShort,
 } from '../lib/time'
+import { ChevronLeftIcon, ChevronRightIcon } from './Icons'
 import { ErrorState, Loading } from './States'
 
 /** 後端限制最遠可預約 90 天、單次查詢最多 14 天。一頁顯示 7 天,每兩頁共用一次查詢 */
@@ -89,7 +90,7 @@ export function SlotPicker({ slug, serviceId, timezone, staffId, selectedStart, 
             setUserDay(null)
           }}
         >
-          ‹
+          <ChevronLeftIcon width={20} height={20} />
         </button>
         <h3 className="strip-title">{formatMonthSpan(days[0], pageLast)}</h3>
         <button
@@ -102,7 +103,7 @@ export function SlotPicker({ slug, serviceId, timezone, staffId, selectedStart, 
             setUserDay(null)
           }}
         >
-          ›
+          <ChevronRightIcon width={20} height={20} />
         </button>
       </div>
 
@@ -117,7 +118,7 @@ export function SlotPicker({ slug, serviceId, timezone, staffId, selectedStart, 
             <button
               key={day}
               type="button"
-              className={`day ${selected ? 'day-on' : ''} ${noSlots ? 'day-off' : ''}`}
+              className={`day ${selected ? 'day-on' : ''} ${noSlots ? 'day-off' : ''} ${day === today ? 'day-today' : ''}`}
               aria-pressed={selected}
               aria-label={`${formatDayLong(day)}${noSlots ? ',沒有空檔' : ''}`}
               disabled={!available}
