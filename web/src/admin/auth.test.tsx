@@ -206,3 +206,71 @@ describe('登入過期', () => {
     expect(client.getQueryCache().getAll()).toHaveLength(0)
   })
 })
+
+describe('忘記密碼 / 重設密碼', () => {
+  it('登入頁有「忘記密碼?」連結;送出 Email 後顯示後端的統一訊息(不洩漏是否註冊)', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${API}/auth/forgot-password`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json(
+          { message: '如果這個 Email 已註冊,重設密碼的信已經寄出。' },
+          { status: 202 },
+        )
+      }),
+    )
+    renderApp('/admin/login')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('link', { name: '忘記密碼?' }))
+    await user.click(await screen.findByRole('button', { name: '寄送重設信' }))
+    expect(await screen.findByText('請輸入 Email')).toBeInTheDocument() // 先在前端擋下
+    expect(sent).toBeUndefined()
+
+    await user.type(screen.getByLabelText('Email'), '  a@example.com ')
+    await user.click(screen.getByRole('button', { name: '寄送重設信' }))
+    expect(await screen.findByText(/重設密碼的信已經寄出/)).toBeInTheDocument()
+    expect(sent).toEqual({ email: 'a@example.com' })
+  })
+
+  it('重設:token 從 # 讀取;兩次密碼要一致;成功後導向登入', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${API}/auth/reset-password`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ message: '密碼已更新,請用新密碼登入。' })
+      }),
+    )
+    const token = 'a'.repeat(64)
+    renderApp(`/admin/reset#token=${token}`)
+    const user = userEvent.setup()
+    await user.type(await screen.findByLabelText('新密碼'), 'new-password-2')
+    await user.type(screen.getByLabelText('再輸入一次'), 'different-pass')
+    await user.click(screen.getByRole('button', { name: '更新密碼' }))
+    expect(await screen.findByText('兩次輸入的密碼不一致')).toBeInTheDocument()
+    expect(body).toBeUndefined()
+
+    await user.clear(screen.getByLabelText('再輸入一次'))
+    await user.type(screen.getByLabelText('再輸入一次'), 'new-password-2')
+    await user.click(screen.getByRole('button', { name: '更新密碼' }))
+    expect(await screen.findByText('密碼已更新,請用新密碼登入。')).toBeInTheDocument()
+    expect(body).toEqual({ token, password: 'new-password-2' })
+    expect(screen.getByRole('link', { name: '前往登入' })).toHaveAttribute('href', '/admin/login')
+  })
+
+  it('連結缺少 token → 顯示無效;token 過期 → 顯示後端訊息與重新申請連結', async () => {
+    const first = renderApp('/admin/reset')
+    expect(await screen.findByText(/重設連結不完整/)).toBeInTheDocument()
+    first.unmount()
+
+    server.use(
+      http.post(`${API}/auth/reset-password`, () => error(400, '重設連結無效或已過期,請重新申請')),
+    )
+    renderApp(`/admin/reset#token=${'b'.repeat(64)}`)
+    const user = userEvent.setup()
+    await user.type(await screen.findByLabelText('新密碼'), 'new-password-2')
+    await user.type(screen.getByLabelText('再輸入一次'), 'new-password-2')
+    await user.click(screen.getByRole('button', { name: '更新密碼' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('已過期')
+    expect(screen.getByRole('link', { name: '重新申請' })).toHaveAttribute('href', '/admin/forgot')
+  })
+})

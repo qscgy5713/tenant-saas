@@ -39,6 +39,10 @@ pub fn routes() -> Router<AppState> {
         .route("/public/shops/{slug}/availability", get(availability))
         .route("/public/shops/{slug}/bookings", post(create_booking))
         .route("/public/bookings/{token}", get(get_booking))
+        .route(
+            "/public/bookings/{token}/availability",
+            get(booking_availability),
+        )
         .route("/public/bookings/{token}/confirm", post(confirm_booking))
         .route("/public/bookings/{token}/cancel", post(cancel_booking))
         .route(
@@ -181,6 +185,30 @@ async fn service_staff(
 
 const MAX_RANGE_DAYS: i64 = 14;
 
+/// 日期範圍的共同檢查(結束不可早於開始,一次最多 14 天)。員工端與顧客端的改期查詢共用
+pub(super) fn validated_range(
+    from: NaiveDate,
+    to: Option<NaiveDate>,
+) -> Result<NaiveDate, AppError> {
+    let to = to.unwrap_or(from);
+    if to < from {
+        return Err(AppError::BadRequest("結束日期不可早於開始日期".into()));
+    }
+    if (to - from).num_days() >= MAX_RANGE_DAYS {
+        return Err(AppError::BadRequest(format!(
+            "一次最多查詢 {MAX_RANGE_DAYS} 天"
+        )));
+    }
+    Ok(to)
+}
+
+/// 改期用的查詢:不需要指定服務與人員(固定是這筆預約的),只要日期範圍
+#[derive(Debug, Deserialize)]
+pub(super) struct RangeQuery {
+    pub from: NaiveDate,
+    pub to: Option<NaiveDate>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AvailabilityQuery {
     service_id: Uuid,
@@ -191,9 +219,9 @@ struct AvailabilityQuery {
 }
 
 #[derive(Debug, Serialize)]
-struct AvailabilityResponse {
-    timezone: String,
-    slots: Vec<Slot>,
+pub(super) struct AvailabilityResponse {
+    pub timezone: String,
+    pub slots: Vec<Slot>,
 }
 
 async fn availability(
@@ -201,18 +229,39 @@ async fn availability(
     Path(slug): Path<String>,
     Query(q): Query<AvailabilityQuery>,
 ) -> Result<Json<AvailabilityResponse>, AppError> {
-    let to = q.to.unwrap_or(q.from);
-    if to < q.from {
-        return Err(AppError::BadRequest("結束日期不可早於開始日期".into()));
-    }
-    if (to - q.from).num_days() >= MAX_RANGE_DAYS {
-        return Err(AppError::BadRequest(format!(
-            "一次最多查詢 {MAX_RANGE_DAYS} 天"
-        )));
-    }
+    let to = validated_range(q.from, q.to)?;
     let (mut tx, _, tz) = open_shop(&state, &slug).await?;
     let service = booking::active_service(&mut tx, q.service_id).await?;
     let slots = booking::availability(&mut tx, tz, &service, q.from, to, q.staff_id, None).await?;
+    tx.rollback().await?;
+    Ok(Json(AvailabilityResponse {
+        timezone: tz.name().to_string(),
+        slots,
+    }))
+}
+
+/// 這筆預約改期時可選的時段:同一位員工、同一個服務,而且**排除這筆預約自己**
+/// (否則自己原本的時段會顯示成忙碌,連小幅調整 10:00 → 10:15 都選不到)。
+async fn booking_availability(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+    Query(q): Query<RangeQuery>,
+) -> Result<Json<AvailabilityResponse>, AppError> {
+    let to = validated_range(q.from, q.to)?;
+    let (mut tx, _, tz) = open_by_token(&state, &raw).await?;
+    let row: Option<(Uuid, Uuid, Uuid, BookingStatus)> = sqlx::query_as(
+        "SELECT id, service_id, staff_user_id, status FROM bookings WHERE manage_token_hash = $1",
+    )
+    .bind(token::hash(&raw))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (id, service_id, staff_id, status) = row.ok_or(AppError::NotFound)?;
+    if status != BookingStatus::Confirmed {
+        return Err(AppError::Conflict("只有已確認的預約可以改期".into()));
+    }
+    let service = booking::active_service(&mut tx, service_id).await?;
+    let slots =
+        booking::availability(&mut tx, tz, &service, q.from, to, Some(staff_id), Some(id)).await?;
     tx.rollback().await?;
     Ok(Json(AvailabilityResponse {
         timezone: tz.name().to_string(),

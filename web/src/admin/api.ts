@@ -1,11 +1,12 @@
 import { api, json } from '../api/client'
-import type { BookingStatus, NewBooking, PublicBooking } from '../api/types'
+import type { Availability, BookingStatus, NewBooking, PublicBooking } from '../api/types'
 import { getSession } from './session'
 import type {
   AdminBooking,
   AdminService,
   AuditPage,
   AuthResponse,
+  Billing,
   BookingQuery,
   Invitation,
   Member,
@@ -51,6 +52,12 @@ export const login = (email: string, password: string) =>
 export const register = (name: string, email: string, password: string) =>
   api<AuthResponse>('/auth/register', json({ name, email, password }))
 
+export const forgotPassword = (email: string) =>
+  api<{ message: string }>('/auth/forgot-password', json({ email }))
+
+export const resetPassword = (token: string, password: string) =>
+  api<{ message: string }>('/auth/reset-password', json({ token, password }))
+
 export const getMe = () => call<User>('/auth/me')
 
 // ---------- 店家 ----------
@@ -78,6 +85,19 @@ export const createBooking = (slug: string, body: NewBooking) =>
   call<{ id: string; staff_id: string; starts_at: string; ends_at: string; manage_token: string }>(
     `/t/${enc(slug)}/bookings`,
     send('POST', body),
+  )
+
+/** 員工端:這筆預約改期時可選的時段(排除自己) */
+export const getBookingAvailability = (slug: string, id: string, from: string, to: string) =>
+  call<Availability>(
+    `/t/${enc(slug)}/bookings/${enc(id)}/availability?${new URLSearchParams({ from, to })}`,
+  )
+
+/** 員工替顧客改期:同一位員工與服務,系統會寄通知信給顧客 */
+export const rescheduleBooking = (slug: string, id: string, start: string) =>
+  call<{ id: string; starts_at: string; ends_at: string }>(
+    `/t/${enc(slug)}/bookings/${enc(id)}/reschedule`,
+    send('POST', { start }),
   )
 
 export const updateBooking = (
@@ -174,6 +194,14 @@ export const listAudit = (
 
 export const getPlan = (slug: string) =>
   call<{ plan: PlanInfo; usage: PlanUsage }>(`/t/${enc(slug)}/plan`)
+
+export const getBilling = (slug: string) => call<Billing>(`/t/${enc(slug)}/billing`)
+
+export const startCheckout = (slug: string, plan: string) =>
+  call<{ url: string }>(`/t/${enc(slug)}/billing/checkout`, send('POST', { plan }))
+
+export const openPortal = (slug: string) =>
+  call<{ url: string }>(`/t/${enc(slug)}/billing/portal`, send('POST', {}))
 
 export const listPlans = () => api<PlanInfo[]>('/plans')
 

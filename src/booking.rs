@@ -390,12 +390,16 @@ pub async fn reschedule_booking(
         return Err(AppError::Conflict("所選時段無法預約".into()));
     }
     let new_end = new_start + service.duration();
-    let result = sqlx::query("UPDATE bookings SET starts_at = $2, ends_at = $3 WHERE id = $1")
-        .bind(booking_id)
-        .bind(new_start)
-        .bind(new_end)
-        .execute(&mut **tx)
-        .await;
+    // reminder_queued_at 清掉、reminder_seq 加一:提醒是針對「那個時間」寄的,改期之後要針對新時間重新排
+    let result = sqlx::query(
+        "UPDATE bookings SET starts_at = $2, ends_at = $3, reminder_queued_at = NULL,
+                reminder_seq = reminder_seq + 1 WHERE id = $1",
+    )
+    .bind(booking_id)
+    .bind(new_start)
+    .bind(new_end)
+    .execute(&mut **tx)
+    .await;
     match result {
         Ok(_) => Ok(old_start),
         Err(e) if pg_code(&e).as_deref() == Some(PG_EXCLUSION_VIOLATION) => Err(

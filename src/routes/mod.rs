@@ -1,5 +1,6 @@
 mod audit_logs;
 mod auth;
+mod billing;
 mod bookings;
 mod health;
 mod members;
@@ -37,6 +38,8 @@ pub struct AppState {
     pub public_base_url: String,
     pub metrics: Option<PrometheusHandle>,
     pub metrics_token: Option<String>,
+    /// 沒設定 Stripe 時為 None:計費端點回 501,前端不顯示升級按鈕
+    pub stripe: Option<Arc<crate::billing::Stripe>>,
 }
 
 impl AppState {
@@ -56,6 +59,10 @@ impl AppState {
             public_base_url: config.public_base_url.clone(),
             metrics: None,
             metrics_token: config.metrics_token.clone(),
+            stripe: config
+                .stripe
+                .clone()
+                .map(|c| Arc::new(crate::billing::Stripe::new(c))),
         }
     }
 
@@ -133,6 +140,7 @@ pub fn router(state: AppState) -> Router {
         .merge(scheduling::routes())
         .merge(bookings::routes())
         .merge(audit_logs::routes())
+        .merge(billing::routes())
         .merge(public)
         .route("/metrics", get(observability::metrics_handler))
         // 越後加的越外層:請求 ID 最外層 → 指標 → 日誌 → 路由

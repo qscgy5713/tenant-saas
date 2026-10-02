@@ -1,6 +1,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { ApiError } from '../../api/client'
+import { shopSlotSource } from '../../api/queries'
 import { getServices, getStaff } from '../../api/public'
 import { SlotPicker } from '../../components/SlotPicker'
 import { Notice } from '../../components/States'
@@ -129,10 +130,8 @@ function NewBookingForm({ onClose, onCreated }: { onClose: () => void; onCreated
       {serviceId && (
         <SlotPicker
           key={`${serviceId}-${staffId ?? 'any'}`}
-          slug={slug}
-          serviceId={serviceId}
+          source={shopSlotSource(slug, serviceId, staffId)}
           timezone={shop.timezone}
-          staffId={staffId}
           selectedStart={choice?.start ?? null}
           onSelect={setChoice}
         />

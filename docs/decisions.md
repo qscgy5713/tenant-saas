@@ -130,4 +130,21 @@
 - 對顧客一律說「額滿」,不暴露方案名稱與上限;員工與 owner 才看到 402 與方案資訊
 
 ## 2026-10-02 方案只能由營運端改
-- `tenant_app` 對 `plans`、`tenants.plan_id` 無寫入權限(測試證明),避免店家自行升級。升降級由之後的 Stripe webhook 或營運人員處理,尚未實作
+- `tenant_app` 對 `plans`、`tenants.plan_id` 無寫入權限(測試證明),避免店家自行升級。升降級由 Stripe webhook(見下)或營運人員處理
+
+## 2026-10-02 計費:方案只由 webhook 改變,計費資料不給租戶角色
+- 結帳完成導回的網址參數不可信,方案只在驗證過簽章的 `customer.subscription.*` 事件後才變;前端導回後輪詢(最多 15 次)等 webhook 生效
+- `tenant_billing`、`stripe_events` 租戶角色與執行階段帳號都無直接權限,只能透過 SECURITY DEFINER 函式:`billing_state` / `billing_attach_customer`(租戶上下文)、`billing_apply_event`(webhook,只授權給 runtime;租戶上下文內呼叫會被拒絕——有測試)
+- 事件去重(`stripe_events`)與亂序保護(只套用 `created` 不早於已套用的事件)寫在資料庫函式內同一交易;付費中卻對不到方案(price 沒設定)回 500 讓 Stripe 重送,且該事件不會被記成已處理
+- `past_due` 維持付費方案(寬限期,由 Stripe 的重試與最終取消事件決定);`incomplete` 不改方案;`canceled/unpaid` 退回免費版。降級不刪資料,只擋新增
+- 客戶建立使用 idempotency key(`tenant-customer-{id}`),同時兩個結帳請求不會建出兩個客戶;已有進行中的訂閱回 409,要變更走客戶入口
+- 只有店主能操作付款(manager 也不行)
+
+## 2026-10-02 忘記密碼
+- 不洩漏帳號是否存在:不論 Email 是否註冊都回同樣的 202,且應用程式端兩種情況做的事相同(都先產生 token 與信件內容,由資料庫函式決定要不要寫入)
+- 同帳號每小時最多 3 次申請(函式內計數),避免被拿來灌爆別人的信箱;token 只存 SHA-256、1 小時、單次;用掉一個就作廢該帳號所有未用的重設連結
+- JWT 無法撤銷,所以 `users.password_changed_at`:驗證登入時若 token 簽發時間早於改密碼時間就拒絕(順便讓「使用者已被刪除」的 token 也失效)。代價:每個已驗證請求多一次主鍵查詢;簽發時間只到秒,同一秒內的舊 token 有約 1 秒窗口
+- `email_outbox.tenant_id` 改為可空(重設信不屬於任何店家);租戶角色因 RLS 看不到這些列,只有 worker 看得到
+
+## 2026-10-02 改期的提醒與去重鍵
+- 舊 bug:改期後 `reminder_queued_at` 沒清、提醒去重鍵是 `reminder:{id}` → 永遠不會再提醒新時間。改為 `bookings.reminder_seq`(每次改期 +1),鍵為 `reminder:{id}:{seq}`;不用開始時間當鍵,因為 A→B→A 會撞鍵

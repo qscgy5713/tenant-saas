@@ -79,6 +79,9 @@ export function LoginPage() {
         </button>
       </form>
       <p className="auth-switch">
+        <Link to="/admin/forgot">忘記密碼?</Link>
+      </p>
+      <p className="auth-switch">
         還沒有帳號?
         <Link to="/admin/register" state={location.state}>
           註冊

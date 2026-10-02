@@ -62,6 +62,27 @@ describe('describeDetail', () => {
     expect(describeDetail(e, tz)).toBe('價格 → 600 元、啟用狀態 → 停用')
   })
 
+  it('付款相關:方案名稱翻成中文;不認得的方案顯示原值', () => {
+    const changed = entry({
+      action: 'billing.plan_changed',
+      detail: { from: 'free', to: 'pro', subscription_status: 'active' },
+    })
+    expect(describeDetail(changed, tz)).toBe('免費版 → 專業版(依付款狀態自動調整)')
+    expect(
+      describeDetail(
+        entry({ action: 'billing.plan_changed', detail: { from: 'pro', to: 'legacy' } }),
+        tz,
+      ),
+    ).toContain('legacy')
+    expect(
+      describeDetail(
+        entry({ action: 'billing.checkout_started', detail: { plan: 'business' } }),
+        tz,
+      ),
+    ).toBe('選擇方案:企業版')
+    expect(actionLabel('billing.plan_changed')).toBe('方案變更')
+  })
+
   it('改期顯示店家時區的前後時間', () => {
     const e = entry({
       action: 'booking.rescheduled',
@@ -92,6 +113,8 @@ describe('describeDetail', () => {
     for (const action of [
       'service.updated',
       'booking.rescheduled',
+      'billing.plan_changed',
+      'billing.checkout_started',
       'member.role_changed',
       'booking.created',
       'unknown.thing',

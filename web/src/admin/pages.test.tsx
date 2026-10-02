@@ -1,11 +1,12 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { freezeNow } from '../test/freeze'
 import { renderApp } from '../test/render'
-import { API, error, server, taipei } from '../test/server'
+import { API, error, server, standardSlots, taipei } from '../test/server'
 import { SHOP, USER, loginAs, mockShopMe, preloadAdmin, spy } from '../test/admin'
+import * as redirect from '../lib/redirect'
 import { canEditSchedule, canRemove } from './permissions'
 import type { AdminBooking, AdminService, Member } from './types'
 
@@ -261,6 +262,195 @@ describe('預約列表', () => {
     await user.click(screen.getByRole('button', { name: '儲存' }))
     await waitFor(() => expect(s.calls).toHaveLength(1))
     expect(s.calls[0].body).toEqual({ notes: '新備註' })
+  })
+})
+
+describe('員工替顧客改期', () => {
+  beforeEach(() => mockShopMe('owner'))
+
+  const slotsFor = (from: string, to: string) => ({
+    timezone: 'Asia/Taipei',
+    slots: standardSlots(from, to, ['u-owner']),
+  })
+
+  it('只有已確認、還沒開始的預約有「改期」;待確認 / 已取消 / 已過去的沒有', async () => {
+    mockBookings([
+      booking({
+        id: 'ok',
+        customer_name: '顧客乙',
+        starts_at: taipei('2026-10-05', '16:00'),
+        ends_at: taipei('2026-10-05', '17:00'),
+      }),
+      booking({
+        id: 'p',
+        customer_name: '顧客丙',
+        status: 'pending',
+        starts_at: taipei('2026-10-05', '16:00'),
+        ends_at: taipei('2026-10-05', '17:00'),
+      }),
+      booking({
+        id: 'c',
+        customer_name: '顧客丁',
+        status: 'cancelled',
+        starts_at: taipei('2026-10-05', '16:00'),
+        ends_at: taipei('2026-10-05', '17:00'),
+      }),
+      booking({
+        id: 'past',
+        customer_name: '顧客戊',
+        starts_at: taipei('2026-10-05', '08:00'),
+        ends_at: taipei('2026-10-05', '09:00'),
+      }),
+    ])
+    renderApp('/admin/demo-salon/bookings?date=2026-10-05')
+    const has = async (name: string) =>
+      within((await screen.findByText(name)).closest('li')!).queryByRole('button', { name: '改期' })
+    expect(await has('顧客乙')).toBeInTheDocument()
+    expect(await has('顧客丙')).not.toBeInTheDocument()
+    expect(await has('顧客丁')).not.toBeInTheDocument()
+    expect(await has('顧客戊')).not.toBeInTheDocument()
+  })
+
+  it('時段來自「依預約」的端點(排除自己),選好後送出新時間並重新整理列表', async () => {
+    let list = [
+      booking({ starts_at: taipei('2026-10-05', '16:00'), ends_at: taipei('2026-10-05', '17:00') }),
+    ]
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings`, () =>
+        HttpResponse.json({ items: list, limit: 100, offset: 0 }),
+      ),
+    )
+    let shopWide = 0
+    const s = spy<{ start?: string }>()
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings/b1/availability`, ({ request }) => {
+        const q = new URL(request.url).searchParams
+        return HttpResponse.json(slotsFor(q.get('from')!, q.get('to')!))
+      }),
+      http.get(
+        `${API}/public/shops/demo-salon/availability`,
+        () => ((shopWide += 1), HttpResponse.json({ timezone: 'Asia/Taipei', slots: [] })),
+      ),
+      http.post(`${API}/t/demo-salon/bookings/b1/reschedule`, async ({ request }) => {
+        await s.record(request)
+        list = [
+          booking({
+            starts_at: taipei('2026-10-06', '14:00'),
+            ends_at: taipei('2026-10-06', '15:00'),
+          }),
+        ]
+        return HttpResponse.json({
+          id: 'b1',
+          starts_at: taipei('2026-10-06', '14:00'),
+          ends_at: taipei('2026-10-06', '15:00'),
+        })
+      }),
+    )
+    renderApp('/admin/demo-salon/bookings?date=2026-10-05')
+    const user = userEvent.setup()
+    const row = (await screen.findByText('王小明')).closest('li')!
+    await user.click(within(row).getByRole('button', { name: '改期' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/通知信給顧客/)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '請先選擇新時間' })).toBeDisabled()
+
+    await user.click(await within(dialog).findByRole('button', { name: '14:00' }))
+    await user.click(within(dialog).getByRole('button', { name: /改到.*14:00/ }))
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({ start: taipei('2026-10-05', '14:00') })
+    expect(shopWide).toBe(0)
+  })
+
+  it('額度不足(402)或時段被占走(409)→ 在對話框顯示後端的原因,不關閉', async () => {
+    mockBookings([
+      booking({ starts_at: taipei('2026-10-05', '16:00'), ends_at: taipei('2026-10-05', '17:00') }),
+    ])
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings/b1/availability`, ({ request }) => {
+        const q = new URL(request.url).searchParams
+        return HttpResponse.json(slotsFor(q.get('from')!, q.get('to')!))
+      }),
+      http.post(`${API}/t/demo-salon/bookings/b1/reschedule`, () =>
+        error(402, '已達「免費版」方案的每月預約數上限(50),請升級方案'),
+      ),
+    )
+    renderApp('/admin/demo-salon/bookings?date=2026-10-05')
+    const user = userEvent.setup()
+    await user.click(
+      within((await screen.findByText('王小明')).closest('li')!).getByRole('button', {
+        name: '改期',
+      }),
+    )
+    const dialog = await screen.findByRole('dialog')
+    await user.click(await within(dialog).findByRole('button', { name: '14:00' }))
+    await user.click(within(dialog).getByRole('button', { name: /改到/ }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('每月預約數上限')
+    expect(dialog).toHaveAttribute('open')
+  })
+})
+
+describe('週日曆', () => {
+  beforeEach(() => mockShopMe('owner'))
+
+  it('畫出整週的預約(不含已取消);點區塊開啟詳情;位置用 class 而不是行內 style', async () => {
+    mockBookings([
+      booking({
+        id: 'mon',
+        customer_name: '週一客',
+        starts_at: taipei('2026-10-05', '16:00'),
+        ends_at: taipei('2026-10-05', '17:00'),
+      }),
+      booking({
+        id: 'sun',
+        customer_name: '週日客',
+        starts_at: taipei('2026-10-11', '15:00'),
+        ends_at: taipei('2026-10-11', '16:00'),
+      }),
+      booking({ id: 'gone', customer_name: '取消客', status: 'cancelled' }),
+    ])
+    renderApp('/admin/demo-salon/bookings?view=week&date=2026-10-07')
+    const user = userEvent.setup()
+    const cal = await screen.findByRole('region', { name: '週日曆' })
+    const mon = await within(cal).findByRole('button', { name: /週一客/ })
+    expect(within(cal).getByRole('button', { name: /週日客/ })).toBeInTheDocument()
+    expect(within(cal).queryByText(/取消客/)).not.toBeInTheDocument()
+
+    // 16:00 相對於 9 點起點 = 28 格;1 小時 = 4 格。不能有行內 style(正式環境 CSP 會擋)
+    expect(mon).toHaveClass('cal-top-28', 'cal-len-4', 'cal-lane-0-of-1')
+    expect(cal.querySelectorAll('[style]')).toHaveLength(0)
+
+    await user.click(mon)
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('週一客')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '改期' })).toBeInTheDocument()
+  })
+
+  it('一週超過一頁(100 筆)也會抓完,並用上一週 / 下一週切換', async () => {
+    const offsets: string[] = []
+    const many = Array.from({ length: 130 }, (_, i) =>
+      booking({
+        id: `m${i}`,
+        customer_name: `客${i}`,
+        starts_at: taipei('2026-10-06', '10:00'),
+        ends_at: taipei('2026-10-06', '11:00'),
+      }),
+    )
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings`, ({ request }) => {
+        const q = new URL(request.url).searchParams
+        offsets.push(`${q.get('offset')}`)
+        const offset = Number(q.get('offset') ?? 0)
+        return HttpResponse.json({ items: many.slice(offset, offset + 100), limit: 100, offset })
+      }),
+    )
+    renderApp('/admin/demo-salon/bookings?view=week&date=2026-10-07')
+    const user = userEvent.setup()
+    const cal = await screen.findByRole('region', { name: '週日曆' })
+    await waitFor(() => expect(within(cal).getAllByRole('button')).toHaveLength(130))
+    expect(offsets).toEqual(['0', '100'])
+
+    await user.click(screen.getByRole('button', { name: '下一週' }))
+    await waitFor(() => expect(screen.getByLabelText('日期')).toHaveValue('2026-10-14'))
   })
 })
 
@@ -596,6 +786,176 @@ describe('接受邀請', () => {
     const user = userEvent.setup()
     await user.click(await screen.findByRole('button', { name: '接受邀請' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('方案上限')
+  })
+})
+
+describe('線上付款(Stripe)', () => {
+  const FREE = {
+    id: 'free',
+    name: '免費版',
+    price_cents: 0,
+    max_staff: 2,
+    max_services: 5,
+    max_bookings_per_month: 50,
+  }
+  const PRO = {
+    id: 'pro',
+    name: '專業版',
+    price_cents: 49900,
+    max_staff: 10,
+    max_services: 50,
+    max_bookings_per_month: 1000,
+  }
+  const usage = { staff: 1, pending_invitations: 0, services: 1, bookings_this_month: 0 }
+  const billing = (over = {}) => ({
+    enabled: true,
+    purchasable: ['pro'],
+    subscription: null,
+    can_checkout: true,
+    can_manage: false,
+    ...over,
+  })
+  const mockPlan = (current = FREE) =>
+    server.use(
+      http.get(`${API}/t/demo-salon/plan`, () => HttpResponse.json({ plan: current, usage })),
+      http.get(`${API}/plans`, () => HttpResponse.json([FREE, PRO])),
+    )
+
+  it('可訂閱的方案顯示「升級」,按下後導向 Stripe 結帳頁;目前方案與不可買的沒有按鈕', async () => {
+    mockShopMe('owner')
+    mockPlan()
+    const go = vi.spyOn(redirect, 'redirectTo').mockImplementation(() => {})
+    const s = spy<{ plan?: string }>()
+    server.use(
+      http.get(`${API}/t/demo-salon/billing`, () => HttpResponse.json(billing())),
+      http.post(`${API}/t/demo-salon/billing/checkout`, async ({ request }) => {
+        await s.record(request)
+        return HttpResponse.json({ url: 'https://checkout.stripe.com/pay/abc' })
+      }),
+    )
+    renderApp('/admin/demo-salon/plan')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '升級到專業版' }))
+    await waitFor(() => expect(go).toHaveBeenCalledWith('https://checkout.stripe.com/pay/abc'))
+    expect(s.calls[0].body).toEqual({ plan: 'pro' })
+    expect(screen.queryByRole('button', { name: '升級到免費版' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/尚未開放/)).not.toBeInTheDocument()
+    go.mockRestore()
+  })
+
+  it('未啟用線上付款 → 沒有升級按鈕,顯示聯絡管理員的說明', async () => {
+    mockShopMe('owner')
+    mockPlan() // 預設的 billing 回應是 enabled: false
+    renderApp('/admin/demo-salon/plan')
+    expect(await screen.findByText(/線上升級與付款尚未開放/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /升級到/ })).not.toBeInTheDocument()
+  })
+
+  it('非店主:不查付款資料、沒有任何付款按鈕', async () => {
+    mockShopMe('manager')
+    mockPlan()
+    let hits = 0
+    server.use(http.get(`${API}/t/demo-salon/billing`, () => ((hits += 1), error(403, '沒有權限'))))
+    renderApp('/admin/demo-salon/plan')
+    expect(await screen.findByText(/升級或變更方案請聯絡店家擁有者/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /升級到|管理訂閱/ })).not.toBeInTheDocument()
+    expect(hits).toBe(0)
+  })
+
+  it('訂閱中:顯示續訂日與「管理訂閱」,不能再升級(避免重複訂閱);按下導向客戶入口', async () => {
+    mockShopMe('owner')
+    mockPlan(PRO)
+    const go = vi.spyOn(redirect, 'redirectTo').mockImplementation(() => {})
+    server.use(
+      http.get(`${API}/t/demo-salon/billing`, () =>
+        HttpResponse.json(
+          billing({
+            can_checkout: false,
+            can_manage: true,
+            subscription: {
+              status: 'active',
+              current_period_end: '2030-03-05T00:00:00Z',
+              cancel_at_period_end: false,
+            },
+          }),
+        ),
+      ),
+      http.post(`${API}/t/demo-salon/billing/portal`, () =>
+        HttpResponse.json({ url: 'https://billing.stripe.com/p/xyz' }),
+      ),
+    )
+    renderApp('/admin/demo-salon/plan')
+    const user = userEvent.setup()
+    expect(await screen.findByText(/訂閱中,下次續訂日/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /升級到/ })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '管理訂閱與付款方式' }))
+    await waitFor(() => expect(go).toHaveBeenCalledWith('https://billing.stripe.com/p/xyz'))
+    go.mockRestore()
+  })
+
+  it('付款失敗(past_due)與期末取消都有明確提示', async () => {
+    mockShopMe('owner')
+    mockPlan(PRO)
+    const sub = (over: object) =>
+      billing({
+        can_checkout: false,
+        can_manage: true,
+        subscription: {
+          status: 'active',
+          current_period_end: '2030-03-05T00:00:00Z',
+          cancel_at_period_end: false,
+          ...over,
+        },
+      })
+    server.use(
+      http.get(`${API}/t/demo-salon/billing`, () => HttpResponse.json(sub({ status: 'past_due' }))),
+    )
+    const first = renderApp('/admin/demo-salon/plan')
+    expect(await screen.findByText(/付款失敗,請更新付款方式/)).toBeInTheDocument()
+    first.unmount()
+
+    server.use(
+      http.get(`${API}/t/demo-salon/billing`, () =>
+        HttpResponse.json(sub({ cancel_at_period_end: true })),
+      ),
+    )
+    renderApp('/admin/demo-salon/plan')
+    expect(await screen.findByText(/到期後取消/)).toBeInTheDocument()
+  })
+
+  it('結帳後導回(?checkout=success):方案還沒生效時顯示處理中,並輪詢到 webhook 生效', async () => {
+    mockShopMe('owner')
+    let polls = 0
+    server.use(
+      http.get(`${API}/t/demo-salon/plan`, () => {
+        polls += 1
+        return HttpResponse.json({ plan: polls >= 3 ? PRO : FREE, usage })
+      }),
+      http.get(`${API}/plans`, () => HttpResponse.json([FREE, PRO])),
+    )
+    renderApp('/admin/demo-salon/plan?checkout=success')
+    expect(await screen.findByText(/方案正在更新/)).toBeInTheDocument()
+    // 方案是等 webhook 才生效的,導回的網址參數本身不能當作已付款
+    expect(
+      await screen.findByText('已升級為「專業版」。', undefined, { timeout: 8000 }),
+    ).toBeInTheDocument()
+    expect(polls).toBeGreaterThanOrEqual(3)
+  }, 15000)
+
+  it('取消結帳(?checkout=cancel)→ 說明方案沒變;付款服務失敗(502)顯示錯誤', async () => {
+    mockShopMe('owner')
+    mockPlan()
+    server.use(
+      http.get(`${API}/t/demo-salon/billing`, () => HttpResponse.json(billing())),
+      http.post(`${API}/t/demo-salon/billing/checkout`, () =>
+        error(502, '付款服務暫時無法使用,請稍後再試'),
+      ),
+    )
+    renderApp('/admin/demo-salon/plan?checkout=cancel')
+    const user = userEvent.setup()
+    expect(await screen.findByText('已取消付款,方案沒有變更。')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '升級到專業版' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('伺服器發生問題') // 共用 API 層把 5xx 統一成這句
   })
 })
 

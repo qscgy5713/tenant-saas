@@ -22,6 +22,12 @@ pub enum AppError {
     LimitReached(String),
     #[error("{0}")]
     Conflict(String),
+    /// 這個功能沒有啟用(例如沒設定 Stripe)
+    #[error("{0}")]
+    NotEnabled(String),
+    /// 上游服務(Stripe)失敗
+    #[error("{0}")]
+    Upstream(String),
     #[error("內部錯誤")]
     Internal(#[source] anyhow::Error),
 }
@@ -48,6 +54,8 @@ impl IntoResponse for AppError {
             AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             AppError::LimitReached(_) => StatusCode::PAYMENT_REQUIRED,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::NotEnabled(_) => StatusCode::NOT_IMPLEMENTED,
+            AppError::Upstream(_) => StatusCode::BAD_GATEWAY,
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, "內部錯誤");
                 StatusCode::INTERNAL_SERVER_ERROR

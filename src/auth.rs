@@ -6,6 +6,7 @@ use argon2::{
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use axum::{extract::FromRequestParts, http::request::Parts};
+use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -82,6 +83,22 @@ impl FromRequestParts<AppState> for AuthUser {
             .strip_prefix("Bearer ")
             .ok_or(AppError::Unauthorized)?;
         let claims = state.jwt.verify(token)?;
+
+        // JWT 本身無法撤銷。每次多查一次主鍵:使用者還在嗎?簽發時間有沒有早於上次改密碼?
+        // 重設密碼後,舊的(可能被盜的)登入因此立刻失效;被刪除的使用者的 token 也不再有效。
+        // 精度:簽發時間只到秒,改密碼後同一秒內簽發的舊 token 不會被擋(約 1 秒的窗口)。
+        let changed: Option<Option<DateTime<Utc>>> =
+            sqlx::query_scalar("SELECT password_changed_at FROM users WHERE id = $1")
+                .bind(claims.sub)
+                .fetch_optional(&state.db)
+                .await?;
+        match changed {
+            None => return Err(AppError::Unauthorized),
+            Some(Some(at)) if (claims.iat as i64) < at.timestamp() => {
+                return Err(AppError::Unauthorized);
+            }
+            Some(_) => {}
+        }
         Ok(AuthUser { id: claims.sub })
     }
 }

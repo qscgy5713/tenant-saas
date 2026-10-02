@@ -11,8 +11,9 @@ use uuid::Uuid;
 use super::AppState;
 use crate::{
     auth::{AuthUser, hash_password, verify_dummy, verify_password},
-    db::PG_UNIQUE_VIOLATION,
+    db::{PG_UNIQUE_VIOLATION, pg_code},
     error::AppError,
+    mail, token,
     validation::normalize_email,
 };
 
@@ -21,6 +22,8 @@ pub fn credential_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
+        .route("/auth/forgot-password", post(forgot_password))
+        .route("/auth/reset-password", post(reset_password))
 }
 
 pub fn routes() -> Router<AppState> {
@@ -140,4 +143,83 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<UserRe
     .await?
     .map(Json)
     .ok_or(AppError::Unauthorized)
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgotRequest {
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Accepted {
+    message: &'static str,
+}
+
+/// 申請重設密碼。**不論 Email 是否註冊都回一模一樣的 202**,不洩漏哪些 Email 已註冊;
+/// 同一個帳號每小時最多 3 封(資料庫函式內控制),避免被拿來灌爆別人的信箱。
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(req): Json<ForgotRequest>,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    let email = normalize_email(&req.email)?;
+
+    // 信件內容永遠先組好(含原始 token),由函式決定要不要寫入 outbox。
+    // 這樣「Email 不存在」與「存在」在應用程式端做的事相同。
+    let raw = token::generate();
+    let link = mail::password_reset_link(&state.public_base_url, &raw);
+    let body = mail::password_reset(&email, &link);
+
+    sqlx::query_scalar::<_, bool>("SELECT request_password_reset($1::citext, $2, $3, $4)")
+        .bind(&email)
+        .bind(token::hash(&raw))
+        .bind(&body.subject)
+        .bind(&body.body)
+        .fetch_one(&state.db)
+        .await?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(Accepted {
+            message: "如果這個 Email 已註冊,重設密碼的信已經寄出。請查看信箱(包含垃圾郵件匣)。",
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetRequest {
+    token: String,
+    password: String,
+}
+
+const PG_NO_DATA_FOUND: &str = "P0002";
+
+/// 用信中的 token 設定新密碼。token 無效、過期、已使用都是同一個錯誤。
+/// 成功後這個帳號所有舊的登入立刻失效(見 `AuthUser`)。
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<ResetRequest>,
+) -> Result<Json<Accepted>, AppError> {
+    let token = req.token.trim();
+    let invalid = || AppError::BadRequest("重設連結無效或已過期,請重新申請".into());
+    if !(16..=128).contains(&token.len()) {
+        return Err(invalid());
+    }
+    let pw_len = req.password.chars().count();
+    if !(8..=128).contains(&pw_len) {
+        return Err(AppError::BadRequest("密碼長度需為 8–128 字".into()));
+    }
+
+    let password_hash = hash_password(req.password).await?;
+    let result = sqlx::query_scalar::<_, Uuid>("SELECT reset_password($1, $2)")
+        .bind(token::hash(token))
+        .bind(&password_hash)
+        .fetch_one(&state.db)
+        .await;
+    match result {
+        Ok(_) => Ok(Json(Accepted {
+            message: "密碼已更新,請用新密碼登入。",
+        })),
+        Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
+        Err(e) => Err(e.into()),
+    }
 }

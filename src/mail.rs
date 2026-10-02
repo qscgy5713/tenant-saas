@@ -187,6 +187,36 @@ pub fn reminder(m: &BookingMail) -> Email {
     }
 }
 
+/// 員工替顧客改期後的通知。不含管理連結(資料庫只存雜湊),改期 / 取消請用確認信中的連結
+pub fn rescheduled(m: &BookingMail, old_when: &str) -> Email {
+    Email {
+        to: m.to.to_string(),
+        subject: format!("預約時間已變更:{}", m.shop),
+        body: format!(
+            "您好,\n\n店家已為您調整預約時間:\n\n  店家:{}\n  服務:{}\n  人員:{}\n  原時間:{}\n  新時間:{}\n\n\
+             如果這個時間不方便,請使用預約確認信中的連結改期或取消。\n",
+            m.shop, m.service, m.staff, old_when, m.when
+        ),
+    }
+}
+
+pub fn password_reset_link(base_url: &str, token: &str) -> String {
+    // token 放在 # 之後:不會送到任何伺服器、不進存取紀錄與 Referer
+    format!("{}/admin/reset#token={token}", base(base_url))
+}
+
+pub fn password_reset(to: &str, link: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "重設您的密碼".to_string(),
+        body: format!(
+            "您好,\n\n我們收到重設密碼的申請。請開啟下列連結設定新密碼:\n\n  {link}\n\n\
+             連結 1 小時內有效,而且只能使用一次。\n\
+             如果這不是您本人的操作,請忽略這封信,您的密碼不會改變。\n"
+        ),
+    }
+}
+
 pub fn invitation(to: &str, shop: &str, role: &str, link: &str) -> Email {
     Email {
         to: to.to_string(),

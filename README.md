@@ -11,7 +11,7 @@
 - [deployment.md](docs/deployment.md):**部署指南**(資料庫角色、步驟、環境變數、監控、上線前檢查表)
 
 ## 狀態
-M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁與店家後台(`web/`);尚未串接 Stripe,方案只能由營運人員改資料庫。** 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。
+M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁與店家後台(`web/`);已串接 Stripe 訂閱(結帳 / 客戶入口 / webhook),但只對 `stripe-mock` 與本機簽章測試驗證過,尚未用真實 Stripe 帳號驗證。**未設定 Stripe 時方案只能由營運人員改資料庫。 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。
 
 ## 快速開始
 ```
@@ -63,7 +63,22 @@ curl 127.0.0.1:3001/health
 | POST | `/public/shops/{slug}/bookings` | 提出預約申請(狀態 `pending`,**不占時段**),系統寄確認信;回應不含 token |
 | POST | `/public/bookings/{token}/confirm` | 按下信中連結後確認,此刻才占位 |
 | GET | `/public/bookings/{token}` | 查看預約(token 只寄到顧客信箱) |
+| GET | `/public/bookings/{token}/availability?from=&to=` | 這筆預約改期時可選的時段(同一位員工與服務,**排除預約自己**) |
 | POST | `/public/bookings/{token}/cancel`、`/reschedule` | 取消 / 改期 |
+
+### 帳號補充(有限流)
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| POST | `/auth/forgot-password` | 申請重設密碼。**不論 Email 是否註冊都回同樣的 202**;同一帳號每小時最多 3 封 |
+| POST | `/auth/reset-password` | 用信中的 token 設定新密碼(單次、1 小時有效);成功後該帳號所有舊登入立即失效 |
+
+### 計費(Stripe;需設定 `STRIPE_*`,否則回 501)
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/t/{slug}/billing` | 訂閱狀態與可訂閱方案(僅店主) |
+| POST | `/t/{slug}/billing/checkout` | `{plan}` → Stripe 結帳頁網址;已有進行中的訂閱回 409 |
+| POST | `/t/{slug}/billing/portal` | Stripe 客戶入口網址(變更方案、付款方式、取消) |
+| POST | `/webhooks/stripe` | Stripe 呼叫;驗證簽章(原始 body、5 分鐘容忍度),事件去重、忽略亂序的舊事件。**方案只由 webhook 改變** |
 
 ### 員工端預約(需登入)
 | 方法 | 路徑 | 說明 |

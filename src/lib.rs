@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod availability;
+pub mod billing;
 pub mod booking;
 pub mod config;
 pub mod db;

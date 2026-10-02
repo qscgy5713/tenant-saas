@@ -113,6 +113,20 @@ export interface AuditPage {
   next_before: number | null
 }
 
+/** GET /t/{slug}/billing(只有店主能看) */
+export interface Billing {
+  enabled: boolean
+  /** 可以線上訂閱的方案 id */
+  purchasable: string[]
+  subscription: {
+    status: string
+    current_period_end: string | null
+    cancel_at_period_end: boolean
+  } | null
+  can_checkout: boolean
+  can_manage: boolean
+}
+
 export interface PlanInfo {
   id: string
   name: string

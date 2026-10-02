@@ -10,6 +10,7 @@ import { useShop } from '../ShopContext'
 import type { AdminBooking } from '../types'
 import { bookingsKey } from '../queries'
 import { ConfirmDialog, Modal } from './Modal'
+import { RescheduleModal } from './RescheduleModal'
 
 /** 一筆預約:時間、顧客、服務、狀態,以及可做的操作 */
 export function BookingRow({
@@ -23,6 +24,7 @@ export function BookingRow({
   const queryClient = useQueryClient()
   const [asking, setAsking] = useState<'cancel' | null>(null)
   const [editingNotes, setEditingNotes] = useState(false)
+  const [rescheduling, setRescheduling] = useState(false)
 
   const tz = shop.timezone
   const now = useNow()
@@ -94,6 +96,15 @@ export function BookingRow({
             </button>
           </>
         )}
+        {booking.status === 'confirmed' && !started && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setRescheduling(true)}
+          >
+            改期
+          </button>
+        )}
         {live && (
           <button
             type="button"
@@ -112,6 +123,11 @@ export function BookingRow({
         </button>
       </div>
 
+      <RescheduleModal
+        booking={booking}
+        open={rescheduling}
+        onClose={() => setRescheduling(false)}
+      />
       <ConfirmDialog
         open={asking === 'cancel'}
         title="取消這筆預約?"

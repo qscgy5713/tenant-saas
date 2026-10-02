@@ -2,8 +2,13 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import { cancelBooking, confirmBooking, rescheduleBooking } from '../api/public'
-import { useBooking } from '../api/queries'
+import {
+  cancelBooking,
+  confirmBooking,
+  getBookingAvailability,
+  rescheduleBooking,
+} from '../api/public'
+import { type SlotSource, useBooking } from '../api/queries'
 import type { BookingStatus, PublicBooking } from '../api/types'
 import { Shell } from '../components/Shell'
 import { SlotPicker } from '../components/SlotPicker'
@@ -31,6 +36,11 @@ export function ManagePage() {
   const [flash, setFlash] = useState<string | null>(null)
   const [pick, setPick] = useState<TimeOption | null>(null)
   const now = useNow()
+  // 改期的時段來源:同一位員工與服務,並排除這筆預約自己(自己原本的時段不是忙碌)
+  const customerRescheduleSource: SlotSource = {
+    key: ['availability', 'booking', token],
+    fetch: (from, to) => getBookingAvailability(token, from, to),
+  }
 
   const done = (next: PublicBooking, message: string) => {
     queryClient.setQueryData(['booking', token], next)
@@ -195,10 +205,8 @@ export function ManagePage() {
               服務人員維持不變:{b.staff_name}。目前的時段在改期完成前不會釋出。
             </p>
             <SlotPicker
-              slug={b.shop_slug}
-              serviceId={b.service_id}
+              source={customerRescheduleSource}
               timezone={tz}
-              staffId={b.staff_id}
               selectedStart={pick?.start ?? null}
               onSelect={setPick}
             />

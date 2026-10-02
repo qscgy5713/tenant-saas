@@ -24,6 +24,18 @@ pub struct Config {
     /// `APP_ENV=production`:啟動時強制檢查資料庫帳號夠不夠受限,並預設不自動套用 migration
     pub production: bool,
     pub auto_migrate: bool,
+    pub stripe: Option<StripeConfig>,
+}
+
+/// 計費設定。`STRIPE_SECRET_KEY` 與 `STRIPE_WEBHOOK_SECRET` 都有才啟用;沒設定時方案只能由營運人員調整
+#[derive(Debug, Clone)]
+pub struct StripeConfig {
+    pub secret_key: String,
+    pub webhook_secret: String,
+    /// 預設 https://api.stripe.com;測試時指向 stripe-mock 或假伺服器
+    pub api_base: String,
+    /// 方案 id(pro / business)→ Stripe price id
+    pub prices: Vec<(String, String)>,
 }
 
 impl Config {
@@ -67,12 +79,43 @@ impl Config {
                 Some("false" | "0") => false,
                 _ => !production,
             },
+            stripe: parse_stripe(|k| std::env::var(k).ok())?,
             worker_poll_secs: match std::env::var("WORKER_POLL_SECS") {
                 Ok(v) => v.parse().context("WORKER_POLL_SECS 必須是整數")?,
                 Err(_) => 5,
             },
         })
     }
+}
+
+/// 環境變數的讀取方式由呼叫端傳入,測試才不必修改行程全域的環境變數(會干擾平行執行的其他測試)
+pub fn parse_stripe(env: impl Fn(&str) -> Option<String>) -> Result<Option<StripeConfig>> {
+    let get = |k: &str| env(k).filter(|v| !v.is_empty());
+    let (key, hook) = (get("STRIPE_SECRET_KEY"), get("STRIPE_WEBHOOK_SECRET"));
+    let (Some(secret_key), Some(webhook_secret)) = (key.clone(), hook.clone()) else {
+        if key.is_some() || hook.is_some() {
+            bail!(
+                "STRIPE_SECRET_KEY 與 STRIPE_WEBHOOK_SECRET 必須同時設定(只設一個會讓 webhook 收不到或無法驗證)"
+            );
+        }
+        return Ok(None);
+    };
+    let prices: Vec<(String, String)> = [
+        ("pro", "STRIPE_PRICE_PRO"),
+        ("business", "STRIPE_PRICE_BUSINESS"),
+    ]
+    .into_iter()
+    .filter_map(|(plan, var)| get(var).map(|p| (plan.to_string(), p)))
+    .collect();
+    if prices.is_empty() {
+        bail!("啟用 Stripe 時至少要設定 STRIPE_PRICE_PRO 或 STRIPE_PRICE_BUSINESS");
+    }
+    Ok(Some(StripeConfig {
+        secret_key,
+        webhook_secret,
+        api_base: get("STRIPE_API_BASE").unwrap_or_else(|| "https://api.stripe.com".into()),
+        prices,
+    }))
 }
 
 /// 空字串視為未設定(端點關閉);太短的 token 拒絕啟動,而不是默默開一個容易被猜中的端點

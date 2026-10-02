@@ -2,7 +2,7 @@ import { useQueryClient, useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import { useServices, useShop, useStaff } from '../api/queries'
+import { shopSlotSource, useServices, useShop, useStaff } from '../api/queries'
 import { createBooking } from '../api/public'
 import type { BookingRequested } from '../api/types'
 import { DetailsForm } from '../components/DetailsForm'
@@ -132,10 +132,8 @@ export function BookPage() {
               )}
               <SlotPicker
                 key={staffId ?? 'any'}
-                slug={slug}
-                serviceId={serviceId}
+                source={shopSlotSource(slug, serviceId, staffId)}
                 timezone={timezone}
-                staffId={staffId}
                 selectedStart={choice?.start ?? null}
                 onSelect={setChoice}
               />

@@ -1,18 +1,36 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { ErrorState, Loading, Notice } from '../../components/States'
 import { meterStep } from '../../lib/meter'
 import { formatPrice } from '../../lib/money'
-import { getPlan, listPlans } from '../api'
+import { ApiError } from '../../api/client'
+import { redirectTo } from '../../lib/redirect'
+import { getBilling, getPlan, listPlans, openPortal, startCheckout } from '../api'
 import { useShop } from '../ShopContext'
-import type { PlanInfo } from '../types'
+import type { Billing, PlanInfo } from '../types'
 
 export function PlanPage() {
-  const { slug } = useShop()
+  const { slug, isOwner } = useShop()
+  const [params] = useSearchParams()
+  const returned = params.get('checkout') // Stripe 結帳完成 / 取消後導回來
   const current = useQuery({
     queryKey: ['admin', 'plan', slug],
     queryFn: () => getPlan(slug),
     staleTime: 10_000,
+    // 剛付完款時,方案是等 Stripe 的 webhook 才會生效(不信任導回來的網址參數),所以每 2 秒查一次,最多 15 次
+    refetchInterval: (q) =>
+      returned === 'success' && q.state.data?.plan.id === 'free' && q.state.dataUpdateCount < 15
+        ? 2000
+        : false,
   })
+  // 付款只有店主能操作;其他人看不到,也不必查
+  const billing = useQuery({
+    queryKey: ['admin', 'billing', slug],
+    queryFn: () => getBilling(slug),
+    enabled: isOwner,
+    staleTime: 10_000,
+  })
+  const paying = billing.data?.enabled === true
   const plans = useQuery({ queryKey: ['plans'], queryFn: listPlans, staleTime: 5 * 60_000 })
 
   if (current.isPending) return <Loading />
@@ -52,14 +70,32 @@ export function PlanPage() {
 
       <section className="section">
         <h2>所有方案</h2>
-        <Notice tone="info">
-          線上升級與付款尚未開放。需要更高的方案請聯絡平台管理員,升級後會立刻生效。
-        </Notice>
+        {isOwner && billing.data && !paying && (
+          <Notice tone="info">
+            線上升級與付款尚未開放。需要更高的方案請聯絡平台管理員,升級後會立刻生效。
+          </Notice>
+        )}
+        {!isOwner && <Notice tone="info">升級或變更方案請聯絡店家擁有者。</Notice>}
+        {returned === 'success' && (
+          <Notice tone="success">
+            {plan.id === 'free'
+              ? '付款已送出,方案正在更新(通常幾秒內完成)。若稍後仍未生效,請聯絡我們。'
+              : `已升級為「${plan.name}」。`}
+          </Notice>
+        )}
+        {returned === 'cancel' && <Notice tone="info">已取消付款,方案沒有變更。</Notice>}
+        {paying && billing.data && <SubscriptionBar billing={billing.data} slug={slug} />}
         {plans.isPending && <Loading label="載入方案…" />}
         {plans.isError && <ErrorState error={plans.error} onRetry={() => plans.refetch()} />}
         <ul className="plan-grid">
           {plans.data?.map((p) => (
-            <PlanCard key={p.id} plan={p} active={p.id === plan.id} />
+            <PlanCard
+              key={p.id}
+              plan={p}
+              active={p.id === plan.id}
+              billing={isOwner ? billing.data : undefined}
+              slug={slug}
+            />
           ))}
         </ul>
       </section>
@@ -110,7 +146,63 @@ function Meter({
 
 const limit = (n: number | null, unit: string) => (n === null ? `${unit}不限` : `${unit} ${n}`)
 
-function PlanCard({ plan, active }: { plan: PlanInfo; active: boolean }) {
+function describeStatus(billing: Billing): string | null {
+  const s = billing.subscription
+  if (!s) return null
+  const end = s.current_period_end
+    ? new Date(s.current_period_end).toLocaleDateString('zh-TW')
+    : null
+  if (s.status === 'past_due') return '付款失敗,請更新付款方式,否則訂閱將被取消。'
+  if (s.cancel_at_period_end)
+    return end ? `訂閱已設定為 ${end} 到期後取消。` : '訂閱已設定為到期後取消。'
+  if (s.status === 'active' || s.status === 'trialing')
+    return end ? `訂閱中,下次續訂日 ${end}。` : '訂閱中。'
+  return null
+}
+
+function useRedirect(call: () => Promise<{ url: string }>) {
+  return useMutation({ mutationFn: call, onSuccess: ({ url }) => redirectTo(url) })
+}
+
+const errorText = (e: unknown) => (e instanceof ApiError ? e.message : '操作失敗,請再試一次。')
+
+/** 訂閱狀態與「管理訂閱」(變更方案、更新付款方式、取消 —— 都在 Stripe 的客戶入口) */
+function SubscriptionBar({ billing, slug }: { billing: Billing; slug: string }) {
+  const portal = useRedirect(() => openPortal(slug))
+  const text = describeStatus(billing)
+  if (!text && !billing.can_manage) return null
+  return (
+    <div className="card-section">
+      {text && <p>{text}</p>}
+      {billing.can_manage && (
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={portal.isPending}
+          onClick={() => portal.mutate()}
+        >
+          {portal.isPending ? '前往中…' : '管理訂閱與付款方式'}
+        </button>
+      )}
+      {portal.isError && <Notice tone="error">{errorText(portal.error)}</Notice>}
+    </div>
+  )
+}
+
+function PlanCard({
+  plan,
+  active,
+  billing,
+  slug,
+}: {
+  plan: PlanInfo
+  active: boolean
+  billing?: Billing
+  slug: string
+}) {
+  const checkout = useRedirect(() => startCheckout(slug, plan.id))
+  const canBuy =
+    !active && !!billing?.enabled && billing.can_checkout && billing.purchasable.includes(plan.id)
   return (
     <li className={`card plan-card ${active ? 'plan-on' : ''}`}>
       <div className="plan-head">
@@ -123,6 +215,17 @@ function PlanCard({ plan, active }: { plan: PlanInfo; active: boolean }) {
         <li>{limit(plan.max_services, '服務')}</li>
         <li>{limit(plan.max_bookings_per_month, '每月預約')}</li>
       </ul>
+      {canBuy && (
+        <button
+          type="button"
+          className="btn btn-primary btn-block"
+          disabled={checkout.isPending}
+          onClick={() => checkout.mutate()}
+        >
+          {checkout.isPending ? '前往付款頁…' : `升級到${plan.name}`}
+        </button>
+      )}
+      {checkout.isError && <Notice tone="error">{errorText(checkout.error)}</Notice>}
     </li>
   )
 }

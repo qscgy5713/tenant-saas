@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, patch},
+    routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,10 @@ use uuid::Uuid;
 
 use serde_json::json;
 
-use super::AppState;
+use super::{
+    AppState,
+    public::{AvailabilityResponse, RangeQuery, validated_range},
+};
 use crate::{
     audit::{self, Actor},
     booking::{self, BookingStatus, NewBooking},
@@ -26,6 +29,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/t/{slug}/bookings", get(list).post(create))
         .route("/t/{slug}/bookings/{id}", patch(update))
+        .route("/t/{slug}/bookings/{id}/availability", get(availability))
+        .route("/t/{slug}/bookings/{id}/reschedule", post(reschedule))
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -265,4 +270,140 @@ async fn update(
     .await?;
     tx.commit().await?;
     Ok(Json(updated))
+}
+
+/// 員工對這筆預約能不能操作:管理者以上,或自己的預約
+fn require_own_or_manager(ctx: &TenantCtx, staff_id: Uuid) -> Result<(), AppError> {
+    if ctx.role == Role::Staff && staff_id != ctx.user_id {
+        Err(AppError::Forbidden)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct Target {
+    staff_user_id: Uuid,
+    service_id: Uuid,
+    status: BookingStatus,
+    starts_at: DateTime<Utc>,
+}
+
+async fn load_target(tx: &mut crate::db::Tx, id: Uuid, lock: bool) -> Result<Target, AppError> {
+    // 兩條固定的 SQL(sqlx 不接受動態拼接的字串)
+    let query = if lock {
+        "SELECT staff_user_id, service_id, status, starts_at FROM bookings WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT staff_user_id, service_id, status, starts_at FROM bookings WHERE id = $1"
+    };
+    sqlx::query_as::<_, Target>(query)
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+/// 這筆預約改期時可選的時段(同一位員工與服務,排除這筆預約自己)
+async fn availability(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path((_slug, id)): Path<(String, Uuid)>,
+    Query(q): Query<RangeQuery>,
+) -> Result<Json<AvailabilityResponse>, AppError> {
+    let to = validated_range(q.from, q.to)?;
+    let mut tx = ctx.begin(&state).await?;
+    let target = load_target(&mut tx, id, false).await?;
+    require_own_or_manager(&ctx, target.staff_user_id)?;
+    if target.status != BookingStatus::Confirmed {
+        return Err(AppError::Conflict("只有已確認的預約可以改期".into()));
+    }
+    let tz = booking::tenant_timezone(&mut tx, ctx.tenant_id).await?;
+    let service = booking::active_service(&mut tx, target.service_id).await?;
+    let slots = booking::availability(
+        &mut tx,
+        tz,
+        &service,
+        q.from,
+        to,
+        Some(target.staff_user_id),
+        Some(id),
+    )
+    .await?;
+    tx.rollback().await?;
+    Ok(Json(AvailabilityResponse {
+        timezone: tz.name().to_string(),
+        slots,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RescheduleBody {
+    start: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rescheduled {
+    id: Uuid,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+}
+
+/// 員工替顧客改期。規則與顧客自己改期相同(同一位員工、同一個服務、跨月要算額度),
+/// 差別是:額度不足回 402(員工看得到方案資訊),並寄通知信告訴顧客時間變了。
+async fn reschedule(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path((_slug, id)): Path<(String, Uuid)>,
+    Json(req): Json<RescheduleBody>,
+) -> Result<Json<Rescheduled>, AppError> {
+    let mut tx = ctx.begin(&state).await?;
+    let target = load_target(&mut tx, id, true).await?;
+    require_own_or_manager(&ctx, target.staff_user_id)?;
+    if target.status != BookingStatus::Confirmed {
+        return Err(AppError::Conflict("只有已確認的預約可以改期".into()));
+    }
+    if target.starts_at <= Utc::now() {
+        return Err(AppError::Conflict("預約已開始,無法改期".into()));
+    }
+    let tz = booking::tenant_timezone(&mut tx, ctx.tenant_id).await?;
+    let service = booking::active_service(&mut tx, target.service_id).await?;
+    let old_start = booking::reschedule_booking(
+        &mut tx,
+        ctx.tenant_id,
+        tz,
+        id,
+        &service,
+        target.staff_user_id,
+        req.start,
+    )
+    .await?;
+
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "booking.rescheduled",
+        "booking",
+        Some(id),
+        json!({ "source": "staff", "from_starts_at": old_start, "to_starts_at": req.start }),
+    )
+    .await?;
+
+    let mail_ctx = booking::mail_ctx(&mut tx, id).await?;
+    let email = mail::rescheduled(&mail_ctx.view(), &mail::format_local(old_start, tz));
+    outbox::enqueue(
+        &mut tx,
+        ctx.tenant_id,
+        &email,
+        Some(&format!("rescheduled:{id}:{}", req.start.timestamp())),
+    )
+    .await?;
+
+    let ends_at = req.start + service.duration();
+    tx.commit().await?;
+    Ok(Json(Rescheduled {
+        id,
+        starts_at: req.start,
+        ends_at,
+    }))
 }

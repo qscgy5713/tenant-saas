@@ -4,7 +4,7 @@ import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { freezeNow } from '../test/freeze'
 import { renderApp } from '../test/render'
-import { API, booking, error, mockShop, server, STAFF_A, taipei } from '../test/server'
+import { API, booking, error, server, standardSlots, taipei } from '../test/server'
 
 beforeEach(() => freezeNow())
 
@@ -89,12 +89,25 @@ describe('預約管理頁(信中的連結)', () => {
     expect(screen.queryByRole('button', { name: '改期' })).not.toBeInTheDocument() // 待確認不能改期
   })
 
-  it('改期:沿用原本的服務與員工查詢時段,送出新的開始時間', async () => {
-    const calls: URLSearchParams[] = []
-    mockShop({ availabilityCalls: calls })
+  it('改期:時段來自「依預約」的端點(排除自己),送出新的開始時間', async () => {
+    const queries: URLSearchParams[] = []
+    let shopWide = 0
     let rescheduled: unknown
     server.use(
       http.get(url(), () => HttpResponse.json(booking())),
+      // 這個端點由後端排除預約自己,所以包含自己原本的 10:00 / 10:15
+      http.get(url('/availability'), ({ request }) => {
+        const q = new URL(request.url).searchParams
+        queries.push(q)
+        return HttpResponse.json({
+          timezone: 'Asia/Taipei',
+          slots: standardSlots(q.get('from')!, q.get('to')!),
+        })
+      }),
+      http.get(
+        `${API}/public/shops/demo-salon/availability`,
+        () => ((shopWide += 1), HttpResponse.json({ timezone: 'Asia/Taipei', slots: [] })),
+      ),
       http.post(url('/reschedule'), async ({ request }) => {
         rescheduled = await request.json()
         return HttpResponse.json(
@@ -110,8 +123,10 @@ describe('預約管理頁(信中的連結)', () => {
     await user.click(await screen.findByRole('button', { name: '改期' }))
     await user.click(await screen.findByRole('button', { name: '10:30' }))
 
-    expect(calls[0].get('service_id')).toBe('svc-cut')
-    expect(calls[0].get('staff_id')).toBe(STAFF_A.id)
+    // 不帶服務 / 員工參數(固定是這筆預約的),也沒有打店家共用的端點(那個會把自己當成忙碌)
+    expect(queries[0].get('from')).toBeTruthy()
+    expect(queries[0].has('service_id') || queries[0].has('staff_id')).toBe(false)
+    expect(shopWide).toBe(0)
     expect(screen.queryByRole('radio')).not.toBeInTheDocument() // 改期不能換人
 
     await user.click(screen.getByRole('button', { name: /改到.*10:30/ }))

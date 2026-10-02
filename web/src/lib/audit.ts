@@ -1,6 +1,8 @@
 import type { AuditEntry } from '../admin/types'
 import { formatDateTime } from './time'
 
+const PLAN_NAME: Record<string, string> = { free: '免費版', pro: '專業版', business: '企業版' }
+
 const ACTION_LABEL: Record<string, string> = {
   'tenant.created': '建立店家',
   'service.created': '新增服務',
@@ -24,6 +26,8 @@ const ACTION_LABEL: Record<string, string> = {
   'booking.completed': '標記為已完成',
   'booking.no_show': '標記為未到',
   'booking.notes_updated': '更新預約備註',
+  'billing.checkout_started': '開始線上訂閱',
+  'billing.plan_changed': '方案變更',
 }
 
 const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }
@@ -98,6 +102,15 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
     case 'booking.created':
     case 'booking.requested':
       return str(d.starts_at) ? `預約時間:${formatDateTime(str(d.starts_at)!, timeZone)}` : null
+    case 'billing.checkout_started':
+      return str(d.plan) ? `選擇方案:${PLAN_NAME[str(d.plan)!] ?? str(d.plan)}` : null
+    case 'billing.plan_changed': {
+      const from = str(d.from)
+      const to = str(d.to)
+      return from && to
+        ? `${PLAN_NAME[from] ?? from} → ${PLAN_NAME[to] ?? to}(依付款狀態自動調整)`
+        : null
+    }
     case 'booking.rescheduled':
       return str(d.from_starts_at) && str(d.to_starts_at)
         ? `${formatDateTime(str(d.from_starts_at)!, timeZone)} → ${formatDateTime(str(d.to_starts_at)!, timeZone)}`
@@ -124,4 +137,5 @@ export const AUDIT_FILTERS: { value: string; label: string }[] = [
   { value: 'member.', label: '成員' },
   { value: 'invitation.', label: '邀請' },
   { value: 'time_off.', label: '休假' },
+  { value: 'billing.', label: '付款' },
 ]

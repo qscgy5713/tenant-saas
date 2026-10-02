@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useAvailability } from '../api/queries'
+import { type SlotSource, useSlots } from '../api/queries'
 import { firstAvailableDay, groupByDay, groupByPeriod, type TimeOption } from '../lib/slots'
 import {
   PERIOD_LABEL,
@@ -22,16 +22,13 @@ const PAGES_PER_WINDOW = 2
 const MAX_PAGE = 12
 
 interface Props {
-  slug: string
-  serviceId: string
+  source: SlotSource
   timezone: string
-  /** null = 不指定員工 */
-  staffId: string | null
   selectedStart: string | null
   onSelect: (option: TimeOption) => void
 }
 
-export function SlotPicker({ slug, serviceId, timezone, staffId, selectedStart, onSelect }: Props) {
+export function SlotPicker({ source, timezone, selectedStart, onSelect }: Props) {
   const today = todayYmd(timezone)
   // 使用者主動翻頁 / 點選日期之前,頁面與日期都由資料推導(預設跳到最早有空的那天)
   const [userPage, setUserPage] = useState<number | null>(null)
@@ -43,13 +40,7 @@ export function SlotPicker({ slug, serviceId, timezone, staffId, selectedStart, 
   // 第一次載入時還不知道最早有空的是哪天,先抓第一個視窗
   const requestedPage = userPage ?? 0
   const fromDay = windowFrom(windowOf(requestedPage))
-  const query = useAvailability({
-    slug,
-    serviceId,
-    staffId,
-    from: fromDay,
-    to: addDays(fromDay, DAYS_PER_PAGE * PAGES_PER_WINDOW - 1),
-  })
+  const query = useSlots(source, fromDay, addDays(fromDay, DAYS_PER_PAGE * PAGES_PER_WINDOW - 1))
 
   const byDay = useMemo(() => groupByDay(query.data?.slots ?? [], timezone), [query.data, timezone])
 

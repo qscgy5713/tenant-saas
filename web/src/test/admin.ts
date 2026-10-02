@@ -28,7 +28,19 @@ export const SHOP = (role: Role = 'owner'): MyShop => ({
 
 /** 註冊「我在這家店的身分」,測試各角色看到的畫面 */
 export function mockShopMe(role: Role = 'owner') {
-  server.use(http.get(`${API}/t/demo-salon/me`, () => HttpResponse.json(SHOP(role))))
+  server.use(
+    http.get(`${API}/t/demo-salon/me`, () => HttpResponse.json(SHOP(role))),
+    // 預設未啟用線上付款;要測計費的測試再自己覆蓋
+    http.get(`${API}/t/demo-salon/billing`, () =>
+      HttpResponse.json({
+        enabled: false,
+        purchasable: [],
+        subscription: null,
+        can_checkout: false,
+        can_manage: false,
+      }),
+    ),
+  )
 }
 
 /** 記錄請求:回傳會被呼叫的次數與內容 */

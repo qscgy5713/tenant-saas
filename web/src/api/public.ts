@@ -32,6 +32,12 @@ export function getAvailability(slug: string, q: AvailabilityQuery) {
   return api<Availability>(`/public/shops/${enc(slug)}/availability?${params}`)
 }
 
+/** 這筆預約改期時可選的時段:同一位員工與服務,而且排除這筆預約自己(自己的時段不是忙碌) */
+export const getBookingAvailability = (token: string, from: string, to: string) =>
+  api<Availability>(
+    `/public/bookings/${enc(token)}/availability?${new URLSearchParams({ from, to })}`,
+  )
+
 export const createBooking = (slug: string, body: NewBooking) =>
   api<BookingRequested>(`/public/shops/${enc(slug)}/bookings`, json(body))
 

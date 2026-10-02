@@ -31,6 +31,7 @@ pub fn test_config(ttl: u64) -> Config {
         metrics_token: None,
         production: false,
         auto_migrate: true,
+        stripe: None,
     }
 }
 

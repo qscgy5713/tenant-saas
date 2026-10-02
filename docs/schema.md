@@ -288,3 +288,13 @@ CREATE POLICY tenant_isolation ON services
 - `tenants.plan_id`(預設 `free`);`tenant_app`、`tenant_worker` 對 `plans` 只有 SELECT
 - `accept_invitation()` 改為同時檢查人數上限,超過回 SQLSTATE `53400`(`configuration_limit_exceeded`)
 - 鎖 key 格式:`quota:{staff|services|bookings}:{tenant_id}`,雜湊用 `hashtextextended(key, 0)`
+
+## 後續新增(0012–0014)
+| 資料表 / 欄位 | 說明 | 存取 |
+|---|---|---|
+| `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
+| `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
+| `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |
+| `password_resets` | token 雜湊、1 小時、單次;每帳號每小時最多 3 筆 | **只能經** `request_password_reset` / `reset_password`(SECURITY DEFINER,授權 runtime) |
+| `tenant_billing` | Stripe 客戶 / 訂閱狀態 / 期末 / 已套用事件時間 | **只能經** `billing_state`、`billing_attach_customer`(租戶上下文)、`billing_apply_event`(webhook,runtime) |
+| `stripe_events` | webhook 事件去重 | 同上 |

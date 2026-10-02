@@ -6,13 +6,17 @@ import { ChevronLeftIcon, ChevronRightIcon, PlusIcon } from '../../components/Ic
 import { addDays, dayRange, formatDayLong, todayYmd } from '../../lib/time'
 import { BookingRow } from '../components/BookingRow'
 import { NewBookingModal } from '../components/NewBookingModal'
-import { bookingsKey, useBookings, useMembers } from '../queries'
+import { WeekCalendar } from '../components/WeekCalendar'
+import { Modal } from '../components/Modal'
+import { weekDays } from '../../lib/calendar'
+import { bookingsKey, useAllBookings, useBookings, useMembers } from '../queries'
 import { useShop } from '../ShopContext'
 
-type View = 'day' | 'pending' | 'upcoming'
+type View = 'day' | 'week' | 'pending' | 'upcoming'
 
 const VIEWS: { value: View; label: string }[] = [
   { value: 'day', label: '依日期' },
+  { value: 'week', label: '週日曆' },
   { value: 'pending', label: '待確認' },
   { value: 'upcoming', label: '近 30 天' },
 ]
@@ -26,6 +30,7 @@ export function BookingsPage() {
   const [params, setParams] = useSearchParams()
   const [creating, setCreating] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
+  const [pickedId, setPickedId] = useState<string | null>(null)
   // 「現在」在這個頁面停留期間固定,避免查詢條件每次渲染都變、一直重新請求
   const [now] = useState(() => new Date())
 
@@ -51,7 +56,19 @@ export function BookingsPage() {
     }
   }, [view, date, tz, staffId, now])
 
-  const bookings = useBookings(slug, query)
+  const bookings = useBookings(slug, query, view !== 'week')
+
+  const weekQuery = useMemo(() => {
+    const days = weekDays(date)
+    return {
+      from: dayRange(days[0], tz).from,
+      to: dayRange(days[6], tz).to,
+      staffId,
+    }
+  }, [date, tz, staffId])
+  const week = useAllBookings(slug, weekQuery, view === 'week')
+  // 以 id 從最新資料找,而不是存整筆:改期 / 取消之後 modal 內容才會跟著更新
+  const picked = week.data?.items.find((b) => b.id === pickedId) ?? null
 
   const update = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params)
@@ -93,13 +110,13 @@ export function BookingsPage() {
           ))}
         </div>
 
-        {view === 'day' && (
+        {(view === 'day' || view === 'week') && (
           <div className="date-nav">
             <button
               type="button"
               className="icon-btn icon-btn-sm"
-              aria-label="前一天"
-              onClick={() => update({ date: addDays(date, -1) })}
+              aria-label={view === 'week' ? '上一週' : '前一天'}
+              onClick={() => update({ date: addDays(date, view === 'week' ? -7 : -1) })}
             >
               <ChevronLeftIcon width={18} height={18} />
             </button>
@@ -112,8 +129,8 @@ export function BookingsPage() {
             <button
               type="button"
               className="icon-btn icon-btn-sm"
-              aria-label="後一天"
-              onClick={() => update({ date: addDays(date, 1) })}
+              aria-label={view === 'week' ? '下一週' : '後一天'}
+              onClick={() => update({ date: addDays(date, view === 'week' ? 7 : 1) })}
             >
               <ChevronRightIcon width={18} height={18} />
             </button>
@@ -152,10 +169,37 @@ export function BookingsPage() {
         </h2>
       )}
 
-      {bookings.isPending && <Loading label="載入預約…" />}
-      {bookings.isError && <ErrorState error={bookings.error} onRetry={() => bookings.refetch()} />}
+      {view === 'week' && (
+        <>
+          {week.isPending && <Loading label="載入預約…" />}
+          {week.isError && <ErrorState error={week.error} onRetry={() => week.refetch()} />}
+          {week.data && (
+            <WeekCalendar
+              date={date}
+              tz={tz}
+              bookings={week.data.items}
+              onPick={(b) => setPickedId(b.id)}
+            />
+          )}
+          {week.data?.truncated && (
+            <Notice tone="info">這週的預約太多,只顯示前 {500} 筆,請改用服務人員縮小範圍。</Notice>
+          )}
+          <Modal open={!!picked} title="預約詳情" onClose={() => setPickedId(null)} size="lg">
+            {picked && (
+              <ul className="rows">
+                <BookingRow booking={picked} showDate />
+              </ul>
+            )}
+          </Modal>
+        </>
+      )}
 
-      {bookings.data && bookings.data.items.length === 0 && (
+      {view !== 'week' && bookings.isPending && <Loading label="載入預約…" />}
+      {view !== 'week' && bookings.isError && (
+        <ErrorState error={bookings.error} onRetry={() => bookings.refetch()} />
+      )}
+
+      {view !== 'week' && bookings.data && bookings.data.items.length === 0 && (
         <div className="empty-card">
           <p>
             {view === 'day' && '這一天沒有預約。'}
@@ -165,7 +209,7 @@ export function BookingsPage() {
         </div>
       )}
 
-      {bookings.data && bookings.data.items.length > 0 && (
+      {view !== 'week' && bookings.data && bookings.data.items.length > 0 && (
         <ul className="rows">
           {bookings.data.items.map((b) => (
             <BookingRow key={b.id} booking={b} showDate={view !== 'day'} />
@@ -173,7 +217,7 @@ export function BookingsPage() {
         </ul>
       )}
 
-      {bookings.data && bookings.data.items.length >= LIMIT && (
+      {view !== 'week' && bookings.data && bookings.data.items.length >= LIMIT && (
         <Notice tone="info">只顯示前 {LIMIT} 筆,請用日期或服務人員縮小範圍。</Notice>
       )}
 

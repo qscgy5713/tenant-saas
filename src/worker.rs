@@ -88,6 +88,7 @@ struct ReminderRow {
     id: Uuid,
     tenant_id: Uuid,
     starts_at: chrono::DateTime<Utc>,
+    reminder_seq: i32,
     customer_email: String,
     service_name: String,
     staff_name: String,
@@ -100,7 +101,7 @@ struct ReminderRow {
 async fn enqueue_reminders(pool: &PgPool) -> Result<u64, AppError> {
     let mut tx = begin_worker(pool).await?;
     let rows = sqlx::query_as::<_, ReminderRow>(
-        "SELECT b.id, b.tenant_id, b.starts_at,
+        "SELECT b.id, b.tenant_id, b.starts_at, b.reminder_seq,
                 c.email::text AS customer_email, s.name AS service_name,
                 u.name AS staff_name, t.name AS shop_name, t.timezone
          FROM bookings b
@@ -138,7 +139,9 @@ async fn enqueue_reminders(pool: &PgPool) -> Result<u64, AppError> {
             &mut tx,
             row.tenant_id,
             &email,
-            Some(&format!("reminder:{}", row.id)),
+            // 去重鍵含排程輪次:每次改期遞增,所以改期後會再提醒一次。
+            // 不用開始時間:A → B → 再改回 A 時,鍵會與第一次相同而被去重吞掉
+            Some(&format!("reminder:{}:{}", row.id, row.reminder_seq)),
         )
         .await?;
         sqlx::query("UPDATE bookings SET reminder_queued_at = now() WHERE id = $1")

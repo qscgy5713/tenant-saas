@@ -817,3 +817,91 @@ fn production_refuses_to_log_emails_instead_of_sending_them() {
         Ok(Mailer::Smtp { .. })
     ));
 }
+
+/// 改期之後要針對「新的時間」重新提醒。原本 `reminder_queued_at` 不會清,
+/// 去重鍵又只有預約 id,所以改期後永遠不會再收到提醒。
+#[sqlx::test]
+async fn rescheduled_bookings_get_a_fresh_reminder(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let customer: Uuid = sqlx::query_scalar("INSERT INTO customers (tenant_id, name, email) VALUES ($1, '顧客', 'c@example.com') RETURNING id")
+        .bind(s.tenant_id).fetch_one(&pool).await.unwrap();
+    let raw = "r".repeat(64);
+    let start = Utc::now() + Duration::hours(20);
+    sqlx::query("INSERT INTO bookings (tenant_id, staff_user_id, service_id, customer_id, starts_at, ends_at, status, manage_token_hash, confirmed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'confirmed', $7, now() - interval '3 days')")
+        .bind(s.tenant_id).bind(s.owner_id).bind(s.service_id.parse::<Uuid>().unwrap()).bind(customer)
+        .bind(start).bind(start + Duration::hours(1)).bind(tenant_saas::token::hash(&raw))
+        .execute(&pool).await.unwrap();
+
+    // 第一次提醒
+    assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+
+    // 顧客改到三天後(合法的營業時段)
+    let new_start = at(day(3), 10, 0);
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{raw}/reschedule"),
+        Some(json!({"start": new_start.to_rfc3339()})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let queued: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT reminder_queued_at FROM bookings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(queued.is_none(), "改期後必須重新排提醒");
+
+    // 模擬時間來到新預約的前一天:應該收到針對新時間的第二封提醒
+    sqlx::query("UPDATE bookings SET starts_at = now() + interval '20 hours', ends_at = now() + interval '21 hours'").execute(&pool).await.unwrap();
+    assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+    let subjects: Vec<String> = memory.sent().iter().map(|m| m.subject.clone()).collect();
+    assert_eq!(
+        subjects.iter().filter(|x| x.contains("提醒")).count(),
+        2,
+        "寄出的信:{subjects:?}"
+    );
+}
+
+/// A → B → 再改回 A:每一輪都要提醒(去重鍵若用開始時間,第三輪會與第一輪撞鍵而被吞掉)
+#[sqlx::test]
+async fn reminders_are_sent_again_after_moving_back_to_the_original_time(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let customer: Uuid = sqlx::query_scalar("INSERT INTO customers (tenant_id, name, email) VALUES ($1, '顧客', 'c@example.com') RETURNING id")
+        .bind(s.tenant_id).fetch_one(&pool).await.unwrap();
+    let raw = "q".repeat(64);
+    let a = at(day(3), 10, 0);
+    let b = at(day(3), 15, 0);
+    sqlx::query("INSERT INTO bookings (tenant_id, staff_user_id, service_id, customer_id, starts_at, ends_at, status, manage_token_hash, confirmed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'confirmed', $7, now() - interval '5 days')")
+        .bind(s.tenant_id).bind(s.owner_id).bind(s.service_id.parse::<Uuid>().unwrap()).bind(customer)
+        .bind(a).bind(a + Duration::hours(1)).bind(tenant_saas::token::hash(&raw))
+        .execute(&pool).await.unwrap();
+
+    for target in [b, a, b] {
+        // 模擬「提醒窗口到了」:把開始時間拉到 20 小時後,寄出提醒,再改期到 target
+        sqlx::query("UPDATE bookings SET starts_at = now() + interval '20 hours', ends_at = now() + interval '21 hours'").execute(&pool).await.unwrap();
+        assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+        let (status, body) = call(
+            &s.app,
+            Method::POST,
+            &format!("/public/bookings/{raw}/reschedule"),
+            Some(json!({"start": target.to_rfc3339()})),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    assert_eq!(
+        memory
+            .sent()
+            .iter()
+            .filter(|m| m.subject.contains("提醒"))
+            .count(),
+        3
+    );
+}

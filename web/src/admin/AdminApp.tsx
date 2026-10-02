@@ -12,6 +12,8 @@ import { MemberPage } from './pages/MemberPage'
 import { ServicesPage } from './pages/ServicesPage'
 import { ShopsPage } from './pages/ShopsPage'
 import { TeamPage } from './pages/TeamPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { ResetPasswordPage } from './pages/ResetPasswordPage'
 import { ShopLayout } from './ShopLayout'
 import { useClearCacheOnLogout } from './useClearCacheOnLogout'
 
@@ -22,6 +24,8 @@ export default function AdminApp() {
     <Routes>
       <Route path="login" element={<LoginPage />} />
       <Route path="register" element={<RegisterPage />} />
+      <Route path="forgot" element={<ForgotPasswordPage />} />
+      <Route path="reset" element={<ResetPasswordPage />} />
       <Route element={<RequireAuth />}>
         <Route index element={<ShopsPage />} />
         <Route path=":slug" element={<ShopLayout />}>

@@ -976,3 +976,269 @@ async fn public_endpoints_are_rate_limited(pool: PgPool) {
         StatusCode::OK
     );
 }
+
+// ---------- 改期:可預約時段排除自己 + 員工替顧客改期 ----------
+
+#[sqlx::test]
+async fn reschedule_availability_does_not_treat_the_booking_itself_as_busy(pool: PgPool) {
+    let s = shop(&pool).await;
+    let d = day(3);
+    let (_, created) = book(&s.app, &s, None, at(d, 10, 0), "c@example.com").await;
+    let token = created["manage_token"].as_str().unwrap();
+    let id = created["id"].as_str().unwrap();
+
+    // 一般的公開查詢:自己的 10:00 與重疊的 09:15–10:45 都是忙碌
+    let general = slots(&s.app, &s, d).await;
+    assert!(!has_start(&general, at(d, 10, 0)) && !has_start(&general, at(d, 10, 15)));
+
+    // 改期專用:自己的時段是空的,連小幅調整(10:15)都選得到
+    let uri = format!("/public/bookings/{token}/availability?from={d}");
+    let (status, body) = call(&s.app, Method::GET, &uri, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let own = body["slots"].as_array().unwrap().clone();
+    assert!(
+        has_start(&own, at(d, 10, 0))
+            && has_start(&own, at(d, 10, 15))
+            && has_start(&own, at(d, 9, 15))
+    );
+
+    // 別人的預約仍然是忙碌
+    book(&s.app, &s, None, at(d, 14, 0), "other@example.com").await;
+    let (_, body) = call(&s.app, Method::GET, &uri, None, None).await;
+    assert!(!has_start(body["slots"].as_array().unwrap(), at(d, 14, 0)));
+
+    // 員工端同樣
+    let staff_uri = format!("/t/shop-a/bookings/{id}/availability?from={d}");
+    let (status, body) = call(&s.app, Method::GET, &staff_uri, None, Some(&s.owner)).await;
+    assert_eq!(status, StatusCode::OK);
+    let slots = body["slots"].as_array().unwrap();
+    assert!(has_start(slots, at(d, 10, 15)) && !has_start(slots, at(d, 14, 0)));
+
+    // 參數與狀態檢查
+    assert_eq!(
+        call(
+            &s.app,
+            Method::GET,
+            &format!("{uri}&to={}", day(30)),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &s.app,
+            Method::GET,
+            &format!("/public/bookings/{}/availability?from={d}", "x".repeat(64)),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/cancel"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        call(&s.app, Method::GET, &uri, None, None).await.0,
+        StatusCode::CONFLICT,
+        "已取消的不能改期"
+    );
+}
+
+#[sqlx::test]
+async fn staff_can_reschedule_and_the_customer_is_told(pool: PgPool) {
+    let s = shop(&pool).await;
+    let d = day(3);
+    let (_, created) = book(&s.app, &s, None, at(d, 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    let uri = format!("/t/shop-a/bookings/{id}/reschedule");
+
+    // 小幅移動(和自己原本的時段重疊)必須允許
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &uri,
+        Some(json!({"start": at(d, 10, 15).to_rfc3339()})),
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["starts_at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap(),
+        at(d, 10, 15)
+    );
+    assert_eq!(
+        body["ends_at"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap(),
+        at(d, 11, 15)
+    );
+
+    // 稽核與通知信
+    let subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM email_outbox WHERE dedupe_key LIKE 'rescheduled:%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(subjects.len(), 1);
+    assert!(subjects[0].contains("已變更"));
+    let detail: serde_json::Value =
+        sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action = 'booking.rescheduled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(detail["source"], "staff");
+
+    // 規則與顧客改期相同:被別人占走 / 不在營業時間 / 過去
+    book(&s.app, &s, None, at(d, 14, 0), "other@example.com").await;
+    let try_at = |t: DateTime<Utc>| {
+        let (app, owner, uri) = (s.app.clone(), s.owner.clone(), uri.clone());
+        async move {
+            call(
+                &app,
+                Method::POST,
+                &uri,
+                Some(json!({"start": t.to_rfc3339()})),
+                Some(&owner),
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(try_at(at(d, 14, 30)).await, StatusCode::CONFLICT);
+    assert_eq!(try_at(at(d, 20, 0)).await, StatusCode::CONFLICT);
+    assert_eq!(
+        try_at(Utc::now() - Duration::hours(1)).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[sqlx::test]
+async fn reschedule_permissions_and_states(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (staff_token, staff_id) = add_second_staff(&pool, &s).await;
+    let d = day(3);
+    let (_, owners) = book(&s.app, &s, Some(s.owner_id), at(d, 10, 0), "a@example.com").await;
+    let (_, theirs) = book(&s.app, &s, Some(staff_id), at(d, 10, 0), "b@example.com").await;
+    let body = |t: DateTime<Utc>| Some(json!({"start": t.to_rfc3339()}));
+    let reschedule = |token: &str, id: &Value, t: DateTime<Utc>| {
+        let (app, token, id) = (
+            s.app.clone(),
+            token.to_string(),
+            id.as_str().unwrap().to_string(),
+        );
+        let b = body(t);
+        async move {
+            call(
+                &app,
+                Method::POST,
+                &format!("/t/shop-a/bookings/{id}/reschedule"),
+                b,
+                Some(&token),
+            )
+            .await
+            .0
+        }
+    };
+
+    // 員工只能動自己的;管理者什麼都能動
+    assert_eq!(
+        reschedule(&staff_token, &owners["id"], at(d, 12, 0)).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        reschedule(&staff_token, &theirs["id"], at(d, 12, 0)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        reschedule(&s.owner, &theirs["id"], at(d, 13, 0)).await,
+        StatusCode::OK
+    );
+    let uri = format!(
+        "/t/shop-a/bookings/{}/availability?from={d}",
+        owners["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(&s.app, Method::GET, &uri, None, Some(&staff_token))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // 找不到 / 未登入
+    assert_eq!(
+        reschedule(&s.owner, &json!(Uuid::new_v4().to_string()), at(d, 12, 0)).await,
+        StatusCode::NOT_FOUND
+    );
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!(
+            "/t/shop-a/bookings/{}/reschedule",
+            owners["id"].as_str().unwrap()
+        ),
+        body(at(d, 12, 0)),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // 已取消的不能改期
+    call(
+        &s.app,
+        Method::PATCH,
+        &format!("/t/shop-a/bookings/{}", owners["id"].as_str().unwrap()),
+        Some(json!({"status": "cancelled"})),
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(
+        reschedule(&s.owner, &owners["id"], at(d, 12, 0)).await,
+        StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test]
+async fn staff_reschedule_into_a_full_month_reports_the_limit(pool: PgPool) {
+    let s = shop(&pool).await;
+    sqlx::query("UPDATE plans SET max_bookings_per_month = 1 WHERE id = 'free'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let first = at(day(5), 10, 0);
+    book(&s.app, &s, None, first, "a@example.com").await; // 占滿這個月唯一的名額
+    let other_month = at(day(5) + Duration::days(40), 10, 0);
+    let (_, created) = book(&s.app, &s, None, other_month, "b@example.com").await;
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!(
+            "/t/shop-a/bookings/{}/reschedule",
+            created["id"].as_str().unwrap()
+        ),
+        Some(json!({"start": (first + Duration::hours(2)).to_rfc3339()})),
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYMENT_REQUIRED,
+        "員工看得到方案資訊: {body}"
+    );
+}
