@@ -31,6 +31,8 @@ const RESERVED_SLUGS: &[&str] = &[
     "www", "api", "app", "admin", "static", "assets", "mail", "public",
 ];
 const PG_INVALID_PARAMETER: &str = "22023";
+/// `create_tenant` 用來表示「已達每位使用者可擁有的店家數量上限」
+const PG_CONFIGURATION_LIMIT_EXCEEDED: &str = "53400";
 
 #[derive(Debug, Deserialize)]
 struct CreateTenantRequest {
@@ -85,12 +87,14 @@ async fn create_tenant(
     }
 
     let mut tx = begin_scoped(&state.db, Some(auth.id), None).await?;
-    let result: Result<Uuid, sqlx::Error> = sqlx::query_scalar("SELECT create_tenant($1, $2, $3)")
-        .bind(&slug)
-        .bind(&name)
-        .bind(&timezone)
-        .fetch_one(&mut *tx)
-        .await;
+    let result: Result<Uuid, sqlx::Error> =
+        sqlx::query_scalar("SELECT create_tenant($1, $2, $3, $4)")
+            .bind(&slug)
+            .bind(&name)
+            .bind(&timezone)
+            .bind(i32::try_from(state.max_shops_per_user).unwrap_or(i32::MAX))
+            .fetch_one(&mut *tx)
+            .await;
     let id = match result {
         Ok(id) => id,
         Err(sqlx::Error::Database(e)) => match e.code().as_deref() {
@@ -99,6 +103,12 @@ async fn create_tenant(
             }
             Some(PG_INVALID_PARAMETER) => {
                 return Err(AppError::BadRequest("不支援的時區".into()));
+            }
+            Some(PG_CONFIGURATION_LIMIT_EXCEEDED) => {
+                return Err(AppError::LimitReached(format!(
+                    "每位使用者最多可以建立 {} 家店,已達上限",
+                    state.max_shops_per_user
+                )));
             }
             _ => return Err(sqlx::Error::Database(e).into()),
         },

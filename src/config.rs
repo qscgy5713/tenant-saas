@@ -17,6 +17,8 @@ pub struct Config {
     pub mail_from: String,
     /// 信中連結的網址前綴(前端網址)
     pub public_base_url: String,
+    /// 每位使用者最多能「擁有」幾家店(防止灌店家、占用代稱)
+    pub max_shops_per_user: u32,
     /// 以 cookie 登入時,允許送出「會改資料」請求的網頁來源(CSRF 防護,見 session.rs)
     pub allowed_origins: Vec<String>,
     pub worker_enabled: bool,
@@ -76,6 +78,7 @@ impl Config {
             mail_from: std::env::var("MAIL_FROM")
                 .unwrap_or_else(|_| "預約系統 <noreply@localhost>".into()),
             public_base_url,
+            max_shops_per_user: parse_max_shops(std::env::var("MAX_SHOPS_PER_USER").ok())?,
             allowed_origins,
             worker_enabled: std::env::var("WORKER_ENABLED")
                 .map(|v| v != "false" && v != "0")
@@ -95,6 +98,18 @@ impl Config {
             },
         })
     }
+}
+
+/// `MAX_SHOPS_PER_USER`:沒設定 = 5;0 會讓所有人都建立不了店家,視為設定錯誤
+pub fn parse_max_shops(value: Option<String>) -> Result<u32> {
+    let Some(v) = value.filter(|v| !v.is_empty()) else {
+        return Ok(5);
+    };
+    let n: u32 = v.trim().parse().context("MAX_SHOPS_PER_USER 必須是整數")?;
+    if n == 0 {
+        bail!("MAX_SHOPS_PER_USER 至少要是 1(0 會讓所有人都建立不了店家)");
+    }
+    Ok(n)
 }
 
 /// 環境變數的讀取方式由呼叫端傳入,測試才不必修改行程全域的環境變數(會干擾平行執行的其他測試)
@@ -154,5 +169,21 @@ mod tests {
             parse_metrics_token(Some("x".repeat(16))).unwrap(),
             Some("x".repeat(16))
         );
+    }
+}
+
+#[cfg(test)]
+mod shop_limit_tests {
+    use super::parse_max_shops;
+
+    #[test]
+    fn max_shops_defaults_and_validates() {
+        assert_eq!(parse_max_shops(None).unwrap(), 5);
+        assert_eq!(parse_max_shops(Some(String::new())).unwrap(), 5);
+        assert_eq!(parse_max_shops(Some("1".into())).unwrap(), 1);
+        assert_eq!(parse_max_shops(Some(" 20 ".into())).unwrap(), 20);
+        for bad in ["0", "-1", "many", "1.5"] {
+            assert!(parse_max_shops(Some(bad.into())).is_err(), "{bad}");
+        }
     }
 }

@@ -1329,6 +1329,55 @@ describe('顧客頁', () => {
   })
 })
 
+describe('建立店家', () => {
+  const open = async () => {
+    server.use(http.get(`${API}/tenants`, () => HttpResponse.json([])))
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '建立店家' }))
+    return { user, dialog: await screen.findByRole('dialog') }
+  }
+
+  it('名稱或代稱沒填 → 前端先擋,不打 API', async () => {
+    let posted = 0
+    server.use(http.post(`${API}/tenants`, () => ((posted += 1), HttpResponse.json({}))))
+    const { user, dialog } = await open()
+    await user.click(within(dialog).getByRole('button', { name: '建立店家' }))
+    expect(await within(dialog).findAllByText(/請/)).not.toHaveLength(0)
+    expect(posted).toBe(0)
+  })
+
+  it('已達店家數量上限(402)→ 顯示後端的原因,視窗不關,不會導頁', async () => {
+    server.use(
+      http.post(`${API}/tenants`, () => error(402, '每位使用者最多可以建立 5 家店,已達上限')),
+    )
+    const { user, dialog } = await open()
+    await user.type(within(dialog).getByLabelText('店家名稱'), '第六家店')
+    await user.type(within(dialog).getByLabelText(/預約頁網址代稱/), 'sixth-shop')
+    await user.click(within(dialog).getByRole('button', { name: '建立店家' }))
+    expect(await within(dialog).findByText(/最多可以建立 5 家店/)).toBeInTheDocument()
+    expect(dialog).toHaveAttribute('open')
+    expect(screen.getByRole('heading', { name: '我的店家' })).toBeInTheDocument()
+  })
+
+  it('送出名稱、代稱(自動轉小寫)與時區', async () => {
+    const s = spy<{ name?: string; slug?: string; timezone?: string }>()
+    server.use(
+      http.post(`${API}/tenants`, async ({ request }) => {
+        await s.record(request)
+        return HttpResponse.json({ ...SHOP(), slug: 'new-salon', name: '新店' }, { status: 201 })
+      }),
+      http.get(`${API}/t/new-salon/me`, () => HttpResponse.json({ ...SHOP(), slug: 'new-salon' })),
+    )
+    const { user, dialog } = await open()
+    await user.type(within(dialog).getByLabelText('店家名稱'), '  新店  ')
+    await user.type(within(dialog).getByLabelText(/預約頁網址代稱/), 'New-Salon')
+    await user.click(within(dialog).getByRole('button', { name: '建立店家' }))
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({ name: '新店', slug: 'new-salon', timezone: 'Asia/Taipei' })
+  })
+})
+
 describe('店家設定', () => {
   it('只有店主看得到「設定」;管理者直接開網址會看到沒有權限', async () => {
     mockShopMe('manager')

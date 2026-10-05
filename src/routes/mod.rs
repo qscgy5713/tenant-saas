@@ -38,6 +38,7 @@ pub struct AppState {
     pub trust_proxy: bool,
     pub public_base_url: String,
     pub cookie: crate::session::CookieConfig,
+    pub max_shops_per_user: u32,
     pub metrics: Option<PrometheusHandle>,
     pub metrics_token: Option<String>,
     /// 沒設定 Stripe 時為 None:計費端點回 501,前端不顯示升級按鈕
@@ -60,6 +61,7 @@ impl AppState {
             trust_proxy: config.trust_proxy,
             public_base_url: config.public_base_url.clone(),
             cookie: crate::session::CookieConfig::new(config),
+            max_shops_per_user: config.max_shops_per_user,
             metrics: None,
             metrics_token: config.metrics_token.clone(),
             stripe: config
