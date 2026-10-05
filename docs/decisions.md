@@ -63,7 +63,7 @@
 
 ## 2026-10-02 店家後台:同一個前端專案、獨立 chunk、權限只決定顯示
 - 放在 `web/src/admin/`,以 `React.lazy` 載入:顧客預約頁不下載後台(約 17KB gzip)。共用設計 token、`SlotPicker`、時間工具
-- **JWT 存 localStorage**:重新整理 / 新分頁仍登入,另一個分頁登出會同步。已知取捨:頁面內的 XSS 能讀到它,所以靠嚴格 CSP(`script-src 'self'`)降低風險,並有 `csp.test.ts` 防止引入行內 script / eval / `dangerouslySetInnerHTML`。更徹底的做法是 httpOnly cookie,需要後端配合(Set-Cookie、CSRF 防護),留待之後
+- ~~JWT 存 localStorage~~(2026-10-05 起改為 HttpOnly cookie,見下方「HttpOnly cookie 登入」)。嚴格 CSP 與 `csp.test.ts`(防行內 script / eval / `dangerouslySetInnerHTML`)仍保留,是 XSS 的第一道防線
 - **登出 / 過期 / 401 一律清空所有快取**:同一台電腦的下一位使用者不能看到上一位的資料。有兩條路徑(登出鈕、登入狀態消失時的 hook),各自有測試
 - **登入後只回站內的 `/admin`、`/invitations`**,防開放式重新導向
 - **前端的權限判斷只決定「顯示什麼」**:員工看不到稽核 / 方案入口,直接輸入網址會看到「沒有權限」且不會打那兩支 API。真正的檢查一律在後端(員工打 API 仍是 403)
@@ -154,6 +154,15 @@
 - 限制記在預約上(`verification_resends` ≤ 3、`verification_sent_at` 間隔 ≥ 60 秒),只有「待確認且未滿 24 小時」才能重寄
 - 不論有沒有真的寄出都回同樣的 202(編號不存在、Email 不符、已確認、已過期、超過次數都一樣),不洩漏預約是否存在。取捨:合法使用者連按時看到成功訊息但實際沒寄,前端按鈕在重寄後停用 60 秒來避免
 - 已知風險:知道編號與 Email 的人可以讓他人最近一封確認信的連結失效(最多 3 次),但拿不到新 token
+
+## 2026-10-05 HttpOnly cookie 登入
+- 動機:JWT 放 localStorage 時,任何一個 XSS 都能把 token 偷走帶著離開。改成 `HttpOnly` cookie 後,注入的腳本讀不到它(仍能在頁面開著時「借用」登入發請求,這是 cookie 方案本來就擋不住的,要靠 CSP 與不引入 XSS)
+- cookie:`HttpOnly; SameSite=Strict; Path=/; Max-Age=JWT_TTL`,正式環境加 `Secure` 並用 `__Host-session`(瀏覽器保證不被子網域覆寫、不可帶 Domain)。開發環境是 http,所以名稱 `session` 且無 Secure
+- **CSRF 不只靠 SameSite**:Strict 的「同站」以可註冊網域為單位,同網域下別的子網域(例如使用者內容的子網域)不會被擋。所以 cookie 認證的寫入請求另外檢查 `Origin` 白名單(精確比對,不用前綴),沒有 Origin 也拒絕。Bearer 不是瀏覽器自動帶的,不檢查
+- Bearer 保留(測試與腳本),且**優先於 cookie**:帶了無效 Bearer 就是 401,不會退回去用 cookie,避免行為模糊。回應 body 仍附 token(非瀏覽器客戶端要用),網頁刻意忽略,型別也不宣告它
+- 登出必須由伺服器做(JS 刪不掉 HttpOnly cookie):`POST /auth/logout` 不需登入、不檢查 Origin(最糟只是被強制登出)。後端連不上時前端仍登出(盡力而為,cookie 最久一小時過期)。JWT 本身仍無法撤銷;改密碼 / 重設密碼會讓所有舊 token(含 cookie)失效
+- 前端不再存 token,啟動時 `GET /auth/me` 確認登入(`loading → in | out`,守衛等它,不然重新整理會閃登入頁)。跨分頁同步改用一個無機密的 `tenant-saas.auth-event` 訊號,收到就重新問後端。升級時主動刪掉舊的 localStorage token。啟動確認用 epoch 防止遲到的「未登入」蓋掉剛登入的人
+- 代價:API 必須與網頁同源(原本就是);必須 HTTPS(`__Host-`/`Secure`);Origin 白名單要和實際網頁來源一致
 
 ## 2026-10-05 migration 0010 的建角色競態(CI 抓到)
 - 症狀:CI 偶爾在 `failed to apply migrations: duplicate key ... pg_authid_rolname_index (tenant_runtime)`。sqlx 的每個測試各建一個資料庫並平行跑 migration,而**角色是整個叢集共用**:「先檢查有沒有、沒有才建立」在檢查與建立之間會被別的測試搶先

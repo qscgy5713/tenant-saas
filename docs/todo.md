@@ -135,7 +135,8 @@
 - [x] 後台:週日曆檢視(重疊的並排、已取消不畫、點開看詳情)
 - [x] 後台:月檢視(點日期進當天列表、點預約看詳情)
 - [x] 後台:週日曆拖曳改期(拖到別天 / 別的時間,吸附 15 分鐘,放開先跳確認再送出;能不能改由後端判斷)。**限制:只支援滑鼠**(HTML5 拖放不支援觸控),鍵盤與手機請用詳情裡的「改期」;月檢視與列表不能拖
-- [ ] 後台:用 httpOnly cookie 取代 localStorage 存 JWT(需後端配合)
+- [x] 後台:用 HttpOnly cookie 取代 localStorage 存 JWT(`__Host-session`、SameSite=Strict、Origin 白名單防 CSRF、`POST /auth/logout`)。**尚未用真實 HTTPS 環境驗證 `__Host-`/`Secure` cookie**(本機只有 http 開發環境);部署時請實測登入
+- [ ] JWT 無法主動撤銷(登出只清 cookie,偷到 token 的人到期前仍可用 Bearer);要做需要 refresh token 或伺服器端 session / token 黑名單
 - [x] 後台:變更店家名稱 / 時區(僅店主;網址代稱不可改)
 - [ ] 後台:刪除預約、匯出;稽核日誌匯出
 - [ ] 後台的端對端(瀏覽器)自動化測試;目前是元件整合測試 + 手動操作

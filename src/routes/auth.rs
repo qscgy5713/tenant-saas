@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::{AppendHeaders, IntoResponse},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,40 @@ pub fn credential_routes() -> Router<AppState> {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/auth/me", get(me))
+    Router::new()
+        .route("/auth/me", get(me))
+        .route("/auth/logout", post(logout))
+}
+
+/// 登入 / 註冊成功的回應:body 給非瀏覽器客戶端(Bearer),瀏覽器用 `Set-Cookie`。
+/// 帶憑證的回應不可被快取。
+fn with_session(
+    state: &AppState,
+    status: StatusCode,
+    auth: AuthResponse,
+) -> impl IntoResponse + use<> {
+    let cookie = state.cookie.set(&auth.token);
+    (
+        status,
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ]),
+        Json(auth),
+    )
+}
+
+/// 登出:HttpOnly 的 cookie 前端的 JS 刪不掉,只能由伺服器清除。
+/// 不需要登入(cookie 過期了也要能登出),也不檢查 Origin:最糟只是被強制登出。
+/// JWT 本身無法撤銷,偷到 token 的人在到期前仍可用 Bearer;改密碼會讓所有舊 token 失效。
+async fn logout(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        AppendHeaders([
+            (header::SET_COOKIE, state.cookie.clear()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ]),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +93,7 @@ struct AuthResponse {
 async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
-) -> Result<(StatusCode, Json<AuthResponse>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let email = normalize_email(&req.email)?;
     let name = req.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 100 {
@@ -92,7 +126,11 @@ async fn register(
     };
 
     let token = state.jwt.issue(user.id)?;
-    Ok((StatusCode::CREATED, Json(AuthResponse { token, user })))
+    Ok(with_session(
+        &state,
+        StatusCode::CREATED,
+        AuthResponse { token, user },
+    ))
 }
 
 #[derive(Debug, FromRow)]
@@ -110,7 +148,7 @@ struct LoginRow {
 async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, AppError> {
+) -> Result<impl IntoResponse, AppError> {
     let email = req.email.trim();
     let row = sqlx::query_as::<_, LoginRow>(
         "SELECT id, email::text AS email, name, password_hash,
@@ -151,14 +189,18 @@ async fn login(
         .await?;
 
     let token = state.jwt.issue(row.id)?;
-    Ok(Json(AuthResponse {
-        token,
-        user: UserResponse {
-            id: row.id,
-            email: row.email,
-            name: row.name,
+    Ok(with_session(
+        &state,
+        StatusCode::OK,
+        AuthResponse {
+            token,
+            user: UserResponse {
+                id: row.id,
+                email: row.email,
+                name: row.name,
+            },
         },
-    }))
+    ))
 }
 
 async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<UserResponse>, AppError> {

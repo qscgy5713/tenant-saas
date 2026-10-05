@@ -1,13 +1,13 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { freezeNow } from '../test/freeze'
 import { renderApp } from '../test/render'
 import { API, error, server } from '../test/server'
-import { SHOP, USER, fakeJwt, loginAs, mockShopMe, preloadAdmin } from '../test/admin'
+import { SHOP, USER, loginAs, mockShopMe, preloadAdmin } from '../test/admin'
 import { safeReturnPath } from './paths'
-import { clearSession, getSession, jwtExpiry, setSession } from './session'
+import { clearSession, getSession, getStatus, restoreSession, setSession } from './session'
 
 beforeAll(preloadAdmin)
 beforeEach(() => freezeNow())
@@ -34,26 +34,65 @@ describe('safeReturnPath:登入後只回站內的後台 / 邀請頁(防開放式
   ])('一律退回 /admin:%j', (input) => expect(safeReturnPath(input)).toBe('/admin'))
 })
 
-describe('session', () => {
-  it('jwtExpiry 解出 exp(毫秒);壞掉的 token 回 null', () => {
-    const token = fakeJwt(600)
-    expect(jwtExpiry(token)).toBeGreaterThan(Date.now())
-    expect(jwtExpiry('garbage')).toBeNull()
-    expect(jwtExpiry('a.b.c')).toBeNull()
-    expect(jwtExpiry(`${btoa('{}')}.${btoa('{"exp":"soon"}')}.x`)).toBeNull()
-  })
-
-  it('沒有 exp 的 token 不接受登入(無法決定何時該過期)', () => {
-    expect(setSession('a.b.c', USER)).toBeNull()
-    expect(getSession()).toBeNull()
-  })
-
-  it('登入狀態存進 localStorage,清除後消失', () => {
+describe('session:登入靠 HttpOnly cookie,前端不存 token', () => {
+  it('登入後前端只記使用者是誰;localStorage 裡沒有 token 也沒有個資', () => {
     loginAs()
-    expect(localStorage.getItem('tenant-saas.session')).toContain(USER.email)
+    expect(getSession()?.user.email).toBe(USER.email)
+    expect(getStatus()).toBe('in')
+    const stored = JSON.stringify({ ...localStorage })
+    expect(stored).not.toContain(USER.email)
+    expect(stored).not.toMatch(/token|eyJ/i)
     clearSession()
-    expect(localStorage.getItem('tenant-saas.session')).toBeNull()
     expect(getSession()).toBeNull()
+    expect(getStatus()).toBe('out')
+  })
+
+  it('登入 / 登出會通知其他分頁(訊號本身沒有任何機密);沒登入時清除不用通知', () => {
+    const signal = () => localStorage.getItem('tenant-saas.auth-event')
+    expect(signal()).toBeNull()
+    setSession(USER)
+    const first = signal()
+    expect(first).toMatch(/^\d+$/)
+    vi.setSystemTime(Date.now() + 1000)
+    clearSession()
+    expect(signal()).not.toBe(first)
+
+    localStorage.clear()
+    clearSession() // 本來就沒登入
+    expect(signal()).toBeNull()
+  })
+
+  it('restoreSession:後端認得 cookie → 登入;401 或連不上 → 未登入', async () => {
+    server.use(http.get(`${API}/auth/me`, () => HttpResponse.json(USER)))
+    await restoreSession()
+    expect(getSession()?.user).toEqual(USER)
+    expect(getStatus()).toBe('in')
+
+    server.use(http.get(`${API}/auth/me`, () => error(401, '未登入或憑證無效')))
+    await restoreSession()
+    expect(getStatus()).toBe('out')
+
+    server.use(http.get(`${API}/auth/me`, () => HttpResponse.json(USER)))
+    await restoreSession()
+    server.use(http.get(`${API}/auth/me`, () => HttpResponse.error()))
+    await restoreSession()
+    expect(getStatus()).toBe('out')
+  })
+
+  it('啟動時的確認還沒回來,使用者就先登入了 → 不能被遲到的「未登入」結果蓋掉', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    server.use(
+      http.get(`${API}/auth/me`, async () => {
+        await gate
+        return error(401, '未登入或憑證無效')
+      }),
+    )
+    const pending = restoreSession()
+    setSession(USER) // 這時候使用者剛好按了登入
+    release()
+    await pending
+    expect(getStatus()).toBe('in')
   })
 })
 
@@ -63,11 +102,13 @@ describe('路由守衛', () => {
     expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
   })
 
-  it('登入成功 → 回到原本要去的頁面,而且 token 帶在後續請求上', async () => {
+  it('登入成功 → 回到原本要去的頁面;token 不進 JS 可及之處(只靠 cookie)', async () => {
     const seen: (string | null)[] = []
     mockShopMe()
     server.use(
-      http.post(`${API}/auth/login`, () => HttpResponse.json({ token: fakeJwt(), user: USER })),
+      http.post(`${API}/auth/login`, () =>
+        HttpResponse.json({ token: 'aaa.bbb.ccc-secret', user: USER }),
+      ),
       http.get(`${API}/t/demo-salon/bookings`, ({ request }) => {
         seen.push(request.headers.get('authorization'))
         return HttpResponse.json({ items: [], limit: 100, offset: 0 })
@@ -81,7 +122,9 @@ describe('路由守衛', () => {
 
     expect(await screen.findByRole('heading', { name: '預約' })).toBeInTheDocument()
     await waitFor(() => expect(seen.length).toBeGreaterThan(0))
-    expect(seen[0]).toMatch(/^Bearer .+\..+\..+$/)
+    // 前端不自己帶 Authorization(那代表 JS 拿著 token);瀏覽器會自動帶 cookie
+    expect(seen.every((h) => h === null)).toBe(true)
+    expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toContain('ccc-secret')
   })
 
   it('已登入的人打開登入頁 → 直接進後台', async () => {
@@ -162,7 +205,6 @@ describe('登入過期', () => {
     const { client } = renderApp('/admin/demo-salon/bookings')
     expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
     expect(getSession()).toBeNull()
-    expect(localStorage.getItem('tenant-saas.session')).toBeNull()
     // 不是按登出鈕,而是登入狀態自己消失:快取一樣要清掉
     await waitFor(() =>
       expect(
@@ -171,28 +213,43 @@ describe('登入過期', () => {
     )
   })
 
-  it('localStorage 裡過期的登入狀態會被丟掉,不當成已登入', () => {
-    localStorage.setItem(
-      'tenant-saas.session',
-      JSON.stringify({ token: fakeJwt(-10), expiresAt: Date.now() - 1000, user: USER }),
-    )
-    // 模組載入時就讀過一次;這裡驗證 storage 事件重新讀取時的行為
-    window.dispatchEvent(new StorageEvent('storage', { key: 'tenant-saas.session' }))
-    expect(getSession()).toBeNull()
-    expect(localStorage.getItem('tenant-saas.session')).toBeNull()
-  })
-
-  it('另一個分頁登出 → 這個分頁也跟著登出', async () => {
+  it('另一個分頁登出 → 這個分頁向後端確認後也跟著登出', async () => {
     loginAs()
     server.use(http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])))
     const { client } = renderApp('/admin')
     expect(await screen.findByRole('heading', { name: '我的店家' })).toBeInTheDocument()
     expect(client.getQueryCache().getAll().length).toBeGreaterThan(0)
 
-    localStorage.removeItem('tenant-saas.session')
-    window.dispatchEvent(new StorageEvent('storage', { key: 'tenant-saas.session' }))
+    // 那個分頁登出後 cookie 已被清掉,後端不再認得
+    server.use(http.get(`${API}/auth/me`, () => error(401, '未登入或憑證無效')))
+    window.dispatchEvent(new StorageEvent('storage', { key: 'tenant-saas.auth-event' }))
     expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
     await waitFor(() => expect(client.getQueryCache().getAll()).toHaveLength(0))
+  })
+
+  it('另一個分頁登入 → 這個分頁(原本未登入)也進得去', async () => {
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.get(`${API}/auth/me`, () => HttpResponse.json(USER)),
+    )
+    renderApp('/admin/login')
+    expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
+    window.dispatchEvent(new StorageEvent('storage', { key: 'tenant-saas.auth-event' }))
+    expect(await screen.findByRole('heading', { name: '我的店家' })).toBeInTheDocument()
+  })
+
+  it('不相干的 storage 事件不會觸發向後端確認', async () => {
+    loginAs()
+    let asked = 0
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.get(`${API}/auth/me`, () => ((asked += 1), HttpResponse.json(USER))),
+    )
+    renderApp('/admin')
+    await screen.findByRole('heading', { name: '我的店家' })
+    window.dispatchEvent(new StorageEvent('storage', { key: 'something-else' }))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(asked).toBe(0)
   })
 
   it('登出會清掉所有快取,下一位登入的人看不到上一位的資料', async () => {
@@ -202,10 +259,32 @@ describe('登入過期', () => {
     await screen.findByRole('heading', { name: '我的店家' })
     expect(client.getQueryCache().getAll().length).toBeGreaterThan(0)
 
+    let loggedOut = 0
+    server.use(
+      http.post(
+        `${API}/auth/logout`,
+        () => ((loggedOut += 1), new HttpResponse(null, { status: 204 })),
+      ),
+    )
     const user = userEvent.setup()
     await user.click(screen.getByRole('button', { name: '登出' }))
     expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
     expect(client.getQueryCache().getAll()).toHaveLength(0)
+    // HttpOnly 的 cookie 前端刪不掉,一定要請後端清
+    expect(loggedOut).toBe(1)
+  })
+
+  it('登出時後端連不上 → 仍然在前端登出(盡力而為)', async () => {
+    loginAs()
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/logout`, () => HttpResponse.error()),
+    )
+    renderApp('/admin')
+    await screen.findByRole('heading', { name: '我的店家' })
+    await userEvent.setup().click(screen.getByRole('button', { name: '登出' }))
+    expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
+    expect(getSession()).toBeNull()
   })
 })
 

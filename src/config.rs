@@ -17,6 +17,8 @@ pub struct Config {
     pub mail_from: String,
     /// 信中連結的網址前綴(前端網址)
     pub public_base_url: String,
+    /// 以 cookie 登入時,允許送出「會改資料」請求的網頁來源(CSRF 防護,見 session.rs)
+    pub allowed_origins: Vec<String>,
     pub worker_enabled: bool,
     pub worker_poll_secs: u64,
     /// 設定後才會開放 `GET /metrics`(需帶 Bearer token);未設定則端點不存在
@@ -46,6 +48,13 @@ impl Config {
         }
         let metrics_token = parse_metrics_token(std::env::var("METRICS_TOKEN").ok())?;
         let production = std::env::var("APP_ENV").is_ok_and(|v| v == "production");
+        let public_base_url =
+            std::env::var("PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:3001".into());
+        let allowed_origins = crate::session::allowed_origins(
+            &public_base_url,
+            std::env::var("ALLOWED_ORIGINS").ok().as_deref(),
+            production,
+        );
         Ok(Self {
             database_url: std::env::var("DATABASE_URL").context("缺少環境變數 DATABASE_URL")?,
             bind_addr: std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3001".into()),
@@ -66,8 +75,8 @@ impl Config {
             smtp_url: std::env::var("SMTP_URL").ok().filter(|v| !v.is_empty()),
             mail_from: std::env::var("MAIL_FROM")
                 .unwrap_or_else(|_| "預約系統 <noreply@localhost>".into()),
-            public_base_url: std::env::var("PUBLIC_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3001".into()),
+            public_base_url,
+            allowed_origins,
             worker_enabled: std::env::var("WORKER_ENABLED")
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),

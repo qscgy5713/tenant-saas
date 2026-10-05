@@ -2,11 +2,11 @@ import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError } from '../../api/client'
-import { Notice } from '../../components/States'
+import { Loading, Notice } from '../../components/States'
 import { acceptInvitation } from '../api'
 import { AuthCard } from '../components/AuthCard'
 import { useLogout } from '../logout'
-import { useSession } from '../session'
+import { useSession, useSessionStatus } from '../session'
 
 /** 邀請信的連結:`/invitations/accept#token=…`。token 放在 # 後面,不會送到伺服器、不會出現在存取紀錄或 Referer */
 function tokenFrom(hash: string, search: string): string | null {
@@ -18,6 +18,7 @@ export function AcceptInvitationPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const session = useSession()
+  const status = useSessionStatus()
   const logout = useLogout()
   // 只在第一次渲染時讀取,之後登入、導頁都不再依賴網址
   const [token] = useState(() => tokenFrom(location.hash, location.search))
@@ -38,6 +39,8 @@ export function AcceptInvitationPage() {
       </AuthCard>
     )
   }
+
+  if (status === 'loading') return <Loading />
 
   if (!session) {
     return (

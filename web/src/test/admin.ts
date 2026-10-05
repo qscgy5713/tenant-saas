@@ -5,17 +5,9 @@ import { API, server } from './server'
 
 export const USER: User = { id: 'u-owner', email: 'owner@demo.example.com', name: '林美玲' }
 
-/** 只有 exp 有意義的 JWT(前端只解 exp 決定何時過期,簽章由後端驗證) */
-export function fakeJwt(expiresInSec = 3600): string {
-  const b64 = (o: object) =>
-    btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
-  return `${b64({ alg: 'HS256' })}.${b64({ sub: 'u', exp: Math.floor(Date.now() / 1000) + expiresInSec })}.sig`
-}
-
-export function loginAs(user: User = USER, expiresInSec = 3600) {
-  const token = fakeJwt(expiresInSec)
-  setSession(token, user)
-  return token
+/** 模擬「已登入」:登入靠 HttpOnly cookie,前端只記使用者是誰 */
+export function loginAs(user: User = USER) {
+  setSession(user)
 }
 
 export const SHOP = (role: Role = 'owner'): MyShop => ({

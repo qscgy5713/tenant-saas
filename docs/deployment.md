@@ -101,7 +101,8 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 | `BIND_ADDR` | | `127.0.0.1:3001`(映像內 `0.0.0.0:3001`) | |
 | `SMTP_URL` | production 必填 | — | 例如 `smtps://user:pass@host:465`。**未設定時信件(含一次性連結)會被印進日誌**,所以 production 會拒絕啟動 |
 | `MAIL_FROM` | | `預約系統 <noreply@localhost>` | |
-| `PUBLIC_BASE_URL` | | `http://localhost:3001` | 信中連結的前端網址 |
+| `PUBLIC_BASE_URL` | | `http://localhost:3001` | 信中連結的前端網址;**同時是允許以 cookie 登入並送出寫入請求的網頁來源**(CSRF 的 Origin 白名單) |
+| `ALLOWED_ORIGINS` | | (空) | 額外允許的網頁來源,逗號分隔,例如 `https://admin.example.com`。非正式環境另外自動允許 `http://localhost:5173` |
 | `WORKER_ENABLED` | | true | 背景寄信 / 提醒 / 整理過期預約 |
 | `WORKER_POLL_SECS` | | 5 | |
 | `PUBLIC_RATE_LIMIT_PER_MIN` | | 60 | 公開預約端點,每來源 |
@@ -136,6 +137,12 @@ docker run -d -p 80:80 -e API_UPSTREAM=http://app:3001 tenant-saas-web
 ```
 
 後端對應設定:
+- **登入用 HttpOnly cookie**(正式環境 cookie 名稱 `__Host-session`,`Secure; HttpOnly; SameSite=Strict; Path=/`)。因此:
+  - **API 必須與網頁同源**(nginx 的 `/api/` 代理已是);跨網域的 API 收不到 cookie
+  - 一定要走 **HTTPS**:`__Host-` 與 `Secure` 的 cookie 在 http 下瀏覽器會直接丟掉,登入會「成功但沒登入」
+  - 反向代理要原樣轉送 `Origin` 標頭(nginx 預設就會)與 `Set-Cookie`;若有自訂 `proxy_set_header Origin` 或 `proxy_hide_header Set-Cookie` 要拿掉
+  - 用 cookie 認證的 POST / PUT / PATCH / DELETE 會檢查 `Origin` 是否在白名單(`PUBLIC_BASE_URL` + `ALLOWED_ORIGINS`);網頁來源和 `PUBLIC_BASE_URL` 不同(例如另有後台網域)就要加進 `ALLOWED_ORIGINS`,否則寫入請求會 403
+  - Bearer token(`Authorization` 標頭)仍可用,給腳本 / 測試;不檢查 Origin
 - `PUBLIC_BASE_URL` 設成**前端的公開網址**(信中的連結是 `${PUBLIC_BASE_URL}/bookings/{token}`)。
 - 後端在 nginx 後面時設 `TRUST_PROXY=true`,限流才會用真實的客戶端 IP(nginx 設定用 `$proxy_add_x_forwarded_for` 附加,後端取最右邊那筆)。
 - 前端與 API 在同一個網域(`/api/` 代理),所以不需要 CORS。

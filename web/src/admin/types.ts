@@ -9,8 +9,8 @@ export interface User {
   name: string
 }
 
+/** 登入 / 註冊的回應。後端也會在 body 附上 token(給非瀏覽器客戶端),網頁刻意不使用,只靠 cookie */
 export interface AuthResponse {
-  token: string
   user: User
 }
 

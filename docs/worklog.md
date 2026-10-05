@@ -2,6 +2,13 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-05(HttpOnly cookie 登入)
+- 後端:`session.rs`(cookie 組裝 / 解析、Origin 白名單)、`AuthUser` 支援 cookie + Bearer、`POST /auth/logout`;前端:session 不存 token、啟動 `/auth/me`、守衛等 loading
+- **發現並承認一個驗證漏洞**:本機一直用 `tsc --noEmit -p .`,但根 `tsconfig.json` 是 project references(`files: []`),這個指令**什麼都不檢查**,所以先前回報的「tsc 乾淨」在本機沒有驗證力(CI 用 `tsc -b` 是綠的,已推送的程式碼沒問題)。之後一律用 `npm run typecheck`
+- 測試教訓:`vi.resetModules()` 會讓後續延遲載入的頁面拿到另一份模組 → 必須獨立成檔案
+- 突變驗證:前端 9 個(1 個等價突變)、後端 11 個
+- 下一步:部署時用真實 HTTPS 實測 `__Host-` cookie
+
 ## 2026-10-05(CI 失敗:建角色競態)
 - 發現 CI 其實早就在跑(`todo.md` 寫「尚未執行」已過時),而帳號鎖定那次 push 的 CI **失敗了**,我當時只看本機結果沒去看 CI。原因與帳號鎖定無關:migration 0010 建角色的競態,間歇性出現
 - 修正 0010、用重現實驗證明、更新本機資料庫校驗碼。教訓:push 後要看 CI 結果(`gh run list`),不能只信本機

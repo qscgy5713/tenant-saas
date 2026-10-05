@@ -26,6 +26,7 @@ pub fn test_config(ttl: u64) -> Config {
         smtp_url: None,
         mail_from: "test <test@example.com>".into(),
         public_base_url: "http://app.test".into(),
+        allowed_origins: vec!["http://app.test".into()],
         worker_enabled: false,
         worker_poll_secs: 1,
         metrics_token: None,

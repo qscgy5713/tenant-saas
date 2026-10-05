@@ -14,6 +14,7 @@ pub mod outbox;
 pub mod plan;
 pub mod ratelimit;
 pub mod routes;
+pub mod session;
 pub mod tenancy;
 pub mod token;
 pub mod validation;

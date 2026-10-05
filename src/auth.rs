@@ -74,14 +74,26 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let header = parts
+        // Bearer(測試、腳本)優先;瀏覽器走 cookie。cookie 是瀏覽器自動帶上的,
+        // 所以用 cookie 認證的寫入請求要多檢查 Origin(CSRF),Bearer 不用
+        let bearer = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::Unauthorized)?;
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(AppError::Unauthorized)?;
+            .and_then(|v| v.to_str().ok());
+        let token = match bearer {
+            Some(h) => h.strip_prefix("Bearer ").ok_or(AppError::Unauthorized)?,
+            None => {
+                let cookie = state
+                    .cookie
+                    .read(&parts.headers)
+                    .ok_or(AppError::Unauthorized)?;
+                if !state.cookie.origin_ok(&parts.method, &parts.headers) {
+                    tracing::warn!(method = %parts.method, "拒絕 Origin 不在白名單內的 cookie 請求");
+                    return Err(AppError::Forbidden);
+                }
+                cookie
+            }
+        };
         let claims = state.jwt.verify(token)?;
 
         // JWT 本身無法撤銷。每次多查一次主鍵:使用者還在嗎?簽發時間有沒有早於上次改密碼?

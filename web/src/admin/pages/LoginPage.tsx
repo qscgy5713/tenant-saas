@@ -22,7 +22,8 @@ export function LoginPage() {
   const mutation = useMutation({
     mutationFn: () => login(email.trim(), password),
     onSuccess: (r) => {
-      if (setSession(r.token, r.user)) navigate(from, { replace: true })
+      setSession(r.user)
+      navigate(from, { replace: true })
     },
   })
 

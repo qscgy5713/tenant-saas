@@ -1,6 +1,5 @@
 import { api, json } from '../api/client'
 import type { Availability, BookingStatus, NewBooking, PublicBooking } from '../api/types'
-import { getSession } from './session'
 import type {
   AdminBooking,
   AdminService,
@@ -25,16 +24,12 @@ import type {
 
 const enc = encodeURIComponent
 
-/** 帶上登入的 JWT。沒登入就不送 Authorization,由後端回 401(全域處理會導向登入頁) */
-function authed(path: string, init: RequestInit = {}) {
-  const token = getSession()?.token
-  return api<never>(path, {
-    ...init,
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },
-  })
-}
-
-const call = <T>(path: string, init?: RequestInit) => authed(path, init) as Promise<T>
+/**
+ * 登入靠後端發的 HttpOnly cookie,瀏覽器對同源請求自動帶上,這裡不碰 token。
+ * 所以 API 必須與頁面同源(正式環境由 nginx 代理 /api,開發由 Vite 代理)。
+ * 沒登入由後端回 401,全域處理會導向登入頁。
+ */
+const call = <T>(path: string, init?: RequestInit) => api<T>(path, init)
 const send = (method: 'PATCH' | 'PUT' | 'POST', body: unknown): RequestInit => ({
   method,
   body: JSON.stringify(body),
@@ -61,6 +56,9 @@ export const resetPassword = (token: string, password: string) =>
   api<{ message: string }>('/auth/reset-password', json({ token, password }))
 
 export const getMe = () => call<User>('/auth/me')
+
+/** 清掉登入 cookie(前端的 JS 刪不掉 HttpOnly cookie) */
+export const logoutRequest = () => api<void>('/auth/logout', { method: 'POST' })
 
 // ---------- 店家 ----------
 export const listShops = () => call<MyShop[]>('/tenants')

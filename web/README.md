@@ -52,7 +52,7 @@ cd web && npm install && npm run dev   # http://127.0.0.1:5173/s/demo-salon
 - 價格:後端只有 `price_cents`,沒有幣別,目前一律以新台幣顯示。
 
 ## 後台的設計重點
-- **登入狀態**存在 `localStorage`(重新整理 / 新分頁仍保持登入),另一個分頁登出會同步。取捨:`localStorage` 可被頁面內的 XSS 讀到,所以用嚴格的 CSP 降低風險;更徹底的做法是 httpOnly cookie,需要後端配合,尚未做。
+- **登入狀態**靠後端發的 HttpOnly cookie,前端的 JavaScript 讀不到、也不存任何 token;前端只記「登入的是誰」,重新整理時用 `GET /auth/me` 向後端確認(確認完成前顯示載入,不會閃一下登入頁)。另一個分頁登入 / 登出會透過一個無機密的 localStorage 訊號同步。API 必須與網頁同源(開發時由 Vite 代理 `/api`,正式環境由 nginx)。
 - **登出、登入過期、後端回 401** 都會清掉所有快取,下一位在同一台電腦登入的人看不到上一位的資料。
 - **登入後只會回到站內的 `/admin`、`/invitations` 路徑**(防開放式重新導向)。
 - **邀請連結的 token 放在 `#` 之後**(`/invitations/accept#token=…`):瀏覽器不會把 `#` 後面的內容送到任何伺服器,不會出現在存取紀錄或 Referer。
