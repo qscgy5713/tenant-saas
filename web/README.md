@@ -21,6 +21,7 @@ cd web && npm install && npm run dev   # http://127.0.0.1:5173/s/demo-salon
 |---|---|
 | `npm run dev` | 開發伺服器 |
 | `npm test` | 單元與整合測試(Vitest + Testing Library + MSW) |
+| `npm run e2e` | 端對端測試(Playwright,見下方「端對端測試」) |
 | `npm run typecheck` / `npm run lint` | 型別檢查 / oxlint |
 | `npm run format` / `format:check` | Prettier |
 | `npm run build` | 正式建置到 `dist/` |
@@ -59,3 +60,22 @@ cd web && npm install && npm run dev   # http://127.0.0.1:5173/s/demo-salon
 - **權限只決定「要不要顯示」**:員工看不到稽核 / 方案的入口,直接輸入網址會看到「沒有權限」,而且根本不會打那兩支 API;真正的檢查一律在後端。
 - **CSP**:正式環境是 `style-src 'self'; script-src 'self'`,**行內 `style` 屬性會被擋掉**(開發環境的 Vite 沒有這個限制,所以「開發時正常、上線後壞掉」)。`src/csp.test.ts` 會在測試時掃描並擋下行內 style、行內 script、`eval`、`dangerouslySetInnerHTML`。
 - 時間輸入(營業時間、休假)一律以店家時區解讀;`lib/time.ts` 的 `zonedToUtc` 處理夏令時間(跳時取跳完後的第一個瞬間、回撥取較早的,與後端規則一致)。
+
+## 端對端測試(`e2e/`)
+
+元件測試用 MSW 假造後端,驗證不了「整條流程接起來」。端對端測試**什麼都不 mock**:真的 Chromium + 真的後端(Rust)+ 真的 PostgreSQL + 真的 SMTP(Mailpit)。
+
+```
+npm run e2e          # 自動準備資料庫與信箱、啟動後端與前端、跑測試(本機需要 Docker)
+npm run e2e:ui       # 用 Playwright 的互動介面除錯
+```
+
+- 使用**獨立的埠與資料庫**(後端 3101、前端 5273、資料庫 `tenant_saas_e2e`),不會碰到你開發用的資料;每次執行都從全新的資料庫開始、清空信箱。
+- 每個測試用自己的隨機帳號與店家,互不影響,所以可以平行。測試資料用後端 API 準備(`e2e/helpers.ts`),**被測的行為一律走畫面**。
+- 信是真的寄出去的:測試從 Mailpit 的 API 讀信、取出信中的連結再用瀏覽器開啟(確認預約、重設密碼)。
+- 目前涵蓋:註冊與開店、HttpOnly cookie 登入與登出、CSRF(Origin 檢查)、顧客預約全流程(含確認信與取消通知)、週日曆拖曳改期(含被拒絕)、員工停用 / 重新啟用、帳號鎖定與忘記密碼。
+- 常見陷阱:
+  - 登入是非同步的 —— 成功的流程用 `signIn`(會等登入完成),別在送出後馬上跳頁,否則會打斷登入請求。
+  - 測試內建的 `request` 會記住 `Set-Cookie`;要驗證「沒登入」要用 `anonymousApi()`。
+  - 登出後再登入會回到「原本想去的頁面」,不一定是店家列表。
+- CI 的 `e2e` 工作用 service container 提供 PostgreSQL 與 Mailpit,失敗時上傳 Playwright 報告與 trace。

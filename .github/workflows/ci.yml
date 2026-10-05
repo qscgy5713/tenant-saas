@@ -95,6 +95,51 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # 端對端:真的瀏覽器(Chromium)+ 真的後端 + 真的 PostgreSQL + 真的 SMTP(Mailpit),什麼都不 mock。
+  # 元件測試驗證不了的整條流程(登入 cookie、寄信與信中連結、拖曳、跨頁面的狀態)在這裡驗證。
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tenant
+          POSTGRES_PASSWORD: tenant
+          POSTGRES_DB: tenant_saas
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tenant -d tenant_saas"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      mailpit:
+        image: axllent/mailpit:latest
+        ports: ["1025:1025", "8025:8025"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e
+        working-directory: web
+        env:
+          E2E_API_CMD: ../target/debug/tenant-saas
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report
+            web/test-results
+          retention-days: 7
+
   docker:
     runs-on: ubuntu-latest
     strategy:

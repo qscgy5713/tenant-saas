@@ -1,8 +1,12 @@
 import '@testing-library/jest-dom/vitest'
-import { cleanup } from '@testing-library/react'
+import { cleanup, configure } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest'
 import { clearSession } from '../admin/session'
 import { server } from './server'
+
+// findBy* / waitFor 預設只等 1 秒。機器忙的時候(本機同時開著別的東西、CI 共用主機)會偶爾逾時,
+// 造成「這次過、下次不過」的假失敗。放寬上限不會讓成功的測試變慢(一找到就結束),只影響失敗時多等一下
+configure({ asyncUtilTimeout: 4000 })
 
 // 未宣告的請求一律失敗,避免測試悄悄打到不存在的網址
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
