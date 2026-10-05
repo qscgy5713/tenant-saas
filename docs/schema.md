@@ -293,6 +293,7 @@ CREATE POLICY tenant_isolation ON services
 | 資料表 / 欄位 | 說明 | 存取 |
 |---|---|---|
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
+| `memberships.active` | 員工停用(離職):false 時進不了這家店、不出現在可預約名單、不佔方案名額;歷史預約保留。見 decisions「員工停用」 | tenant_app(經 `deactivate` / `reactivate` 端點) |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
 | `users.failed_logins` / `last_failed_login_at` / `locked_until` | 帳號鎖定:5 次 / 15 分鐘;鎖定中不再計數、不延長;距上次失敗超過 15 分鐘重算 | **只能經** `login_failed` / `login_succeeded`(SECURITY DEFINER);`tenant_app` 讀不到 |
 | `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |

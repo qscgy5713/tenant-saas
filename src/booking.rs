@@ -80,9 +80,10 @@ async fn load_schedules(
     exclude_booking: Option<Uuid>,
 ) -> Result<Vec<StaffSchedule>, AppError> {
     let staff: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM staff_services
-         WHERE service_id = $1 AND ($2::uuid IS NULL OR user_id = $2)
-         ORDER BY user_id",
+        "SELECT ss.user_id FROM staff_services ss
+         JOIN memberships m ON m.user_id = ss.user_id AND m.active
+         WHERE ss.service_id = $1 AND ($2::uuid IS NULL OR ss.user_id = $2)
+         ORDER BY ss.user_id",
     )
     .bind(service_id)
     .bind(staff_filter)

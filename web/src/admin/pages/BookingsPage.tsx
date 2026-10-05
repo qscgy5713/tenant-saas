@@ -173,7 +173,7 @@ export function BookingsPage() {
             <option value="">全部人員</option>
             {members.data?.map((m) => (
               <option key={m.user_id} value={m.user_id}>
-                {m.name}
+                {m.active ? m.name : `${m.name}(已停用)`}
               </option>
             ))}
           </select>

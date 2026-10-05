@@ -10,12 +10,14 @@ import { validateEmail } from '../../lib/validate'
 import {
   changeRole,
   createInvitation,
+  deactivateMember,
   listInvitations,
+  reactivateMember,
   removeMember,
   revokeInvitation,
 } from '../api'
 import { ConfirmDialog, Modal } from '../components/Modal'
-import { canRemove } from '../permissions'
+import { canDeactivate, canReactivate, canRemove } from '../permissions'
 import { useMembers } from '../queries'
 import { ROLE_LABEL, useShop } from '../ShopContext'
 import type { Member, Role } from '../types'
@@ -35,6 +37,7 @@ export function TeamPage() {
   })
   const [inviting, setInviting] = useState(false)
   const [removing, setRemoving] = useState<Member | null>(null)
+  const [deactivating, setDeactivating] = useState<Member | null>(null)
   const [revoking, setRevoking] = useState<string | null>(null)
 
   const refreshMembers = () => {
@@ -49,8 +52,15 @@ export function TeamPage() {
   })
   const removeMutation = useMutation({
     mutationFn: (m: Member) => removeMember(slug, m.user_id),
-    onSuccess: (_d, m) => {
+    onSuccess: () => {
       setRemoving(null)
+      refreshMembers()
+    },
+  })
+  const deactivateMutation = useMutation({
+    mutationFn: (m: Member) => deactivateMember(slug, m.user_id),
+    onSuccess: (_d, m) => {
+      setDeactivating(null)
       refreshMembers()
       if (m.user_id === user.id) {
         // 自己退出:這家店已經進不去了,清掉它的快取並回到店家列表
@@ -58,6 +68,10 @@ export function TeamPage() {
         navigate('/admin')
       }
     },
+  })
+  const reactivateMutation = useMutation({
+    mutationFn: (m: Member) => reactivateMember(slug, m.user_id),
+    onSuccess: refreshMembers,
   })
   const revokeMutation = useMutation({
     mutationFn: (id: string) => revokeInvitation(slug, id),
@@ -88,6 +102,9 @@ export function TeamPage() {
       </div>
 
       {roleMutation.error && <Notice tone="error">{errorText(roleMutation.error)}</Notice>}
+      {reactivateMutation.error && (
+        <Notice tone="error">{errorText(reactivateMutation.error)}</Notice>
+      )}
 
       {members.isPending && <Loading label="載入成員…" />}
       {members.isError && <ErrorState error={members.error} onRetry={() => members.refetch()} />}
@@ -96,19 +113,20 @@ export function TeamPage() {
         {members.data?.map((m) => {
           const self = m.user_id === user.id
           return (
-            <li key={m.user_id} className="row member-row">
+            <li key={m.user_id} className={`row member-row ${m.active ? '' : 'row-inactive'}`}>
               <div className="member-id">
                 <Avatar name={m.name} size="md" />
                 <div className="row-main">
                   <div className="row-title">
                     {m.name}
                     {self && <span className="chip chip-muted badge-inline">你</span>}
+                    {!m.active && <span className="chip chip-muted badge-inline">已停用</span>}
                   </div>
                   <div className="row-sub">{m.email}</div>
                 </div>
               </div>
               <div className="row-actions">
-                {isOwner && m.role !== 'owner' ? (
+                {isOwner && m.role !== 'owner' && m.active ? (
                   <select
                     aria-label={`${m.name} 的角色`}
                     value={m.role}
@@ -129,13 +147,33 @@ export function TeamPage() {
                 <Link className="btn btn-secondary btn-sm" to={m.user_id}>
                   {self || canManage ? '設定' : '查看'}
                 </Link>
-                {canRemove({ id: user.id, role }, m) && (
+                {canReactivate({ id: user.id, role }, m) && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={reactivateMutation.isPending}
+                    onClick={() => reactivateMutation.mutate(m)}
+                  >
+                    重新啟用
+                  </button>
+                )}
+                {canDeactivate({ id: user.id, role }, m) && (
+                  <button
+                    type="button"
+                    className="btn btn-danger-outline btn-sm"
+                    onClick={() => setDeactivating(m)}
+                  >
+                    {self ? '退出團隊' : '停用'}
+                  </button>
+                )}
+                {/* 自己退出一律走停用(保留歷史);真正刪除只給管理者,而且有預約紀錄的刪不掉 */}
+                {!self && canRemove({ id: user.id, role }, m) && (
                   <button
                     type="button"
                     className="btn btn-danger-outline btn-sm"
                     onClick={() => setRemoving(m)}
                   >
-                    {self ? '退出團隊' : '移除'}
+                    移除
                   </button>
                 )}
               </div>
@@ -183,14 +221,28 @@ export function TeamPage() {
       <InviteModal open={inviting} onClose={() => setInviting(false)} />
 
       <ConfirmDialog
-        open={removing !== null}
-        title={removing?.user_id === user.id ? '退出這家店?' : '移除這位成員?'}
+        open={deactivating !== null}
+        title={deactivating?.user_id === user.id ? '退出這家店?' : '停用這位成員?'}
         message={
-          removing?.user_id === user.id
-            ? '退出後你就不能再進入這家店的後台。'
-            : `${removing?.name} 會失去這家店的所有存取權限。如果他有預約紀錄就無法移除。`
+          deactivating?.user_id === user.id
+            ? '退出後你就不能再進入這家店的後台,顧客也不能再預約你。歷史預約會保留,管理者可以讓你重新加入。'
+            : `${deactivating?.name} 會失去這家店的存取權限,顧客也不能再預約他;歷史預約與紀錄會保留,之後可以重新啟用。還有未來已確認的預約時無法停用,請先取消或請顧客改期。`
         }
-        confirmLabel={removing?.user_id === user.id ? '退出' : '移除'}
+        confirmLabel={deactivating?.user_id === user.id ? '退出' : '停用'}
+        danger
+        pending={deactivateMutation.isPending}
+        error={errorText(deactivateMutation.error)}
+        onConfirm={() => deactivating && deactivateMutation.mutate(deactivating)}
+        onClose={() => {
+          setDeactivating(null)
+          deactivateMutation.reset()
+        }}
+      />
+      <ConfirmDialog
+        open={removing !== null}
+        title="移除這位成員?"
+        message={`${removing?.name} 會從團隊名單中刪除。有預約紀錄的成員無法移除,請改用「停用」。`}
+        confirmLabel="移除"
         danger
         pending={removeMutation.isPending}
         error={errorText(removeMutation.error)}

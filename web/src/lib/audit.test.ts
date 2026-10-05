@@ -96,6 +96,26 @@ describe('describeDetail', () => {
     expect(actionLabel('billing.payment_failed')).toBe('訂閱扣款失敗')
   })
 
+  it('停用 / 重新啟用成員', () => {
+    expect(actionLabel('member.deactivated')).toBe('停用成員')
+    expect(actionLabel('member.reactivated')).toBe('重新啟用成員')
+    expect(
+      describeDetail(
+        entry({ action: 'member.deactivated', detail: { role: 'staff', self: false } }),
+        tz,
+      ),
+    ).toBe('角色:員工')
+    expect(
+      describeDetail(
+        entry({ action: 'member.deactivated', detail: { role: 'staff', self: true } }),
+        tz,
+      ),
+    ).toBe('本人退出')
+    expect(
+      describeDetail(entry({ action: 'member.reactivated', detail: { role: 'manager' } }), tz),
+    ).toContain('管理者')
+  })
+
   it('改期顯示店家時區的前後時間', () => {
     const e = entry({
       action: 'booking.rescheduled',

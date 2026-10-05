@@ -35,6 +35,14 @@ pub fn routes() -> Router<AppState> {
             "/t/{slug}/members/{user_id}",
             patch(change_role).delete(remove_member),
         )
+        .route(
+            "/t/{slug}/members/{user_id}/deactivate",
+            post(deactivate_member),
+        )
+        .route(
+            "/t/{slug}/members/{user_id}/reactivate",
+            post(reactivate_member),
+        )
 }
 
 const INVITATION_TTL_DAYS: i64 = 7;
@@ -76,15 +84,20 @@ async fn create_invitation(
     let email = normalize_email(&req.email)?;
 
     let mut tx = ctx.begin(&state).await?;
-    let already_member = sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1::citext",
+    let existing = sqlx::query_scalar::<_, bool>(
+        "SELECT m.active FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1::citext",
     )
     .bind(&email)
     .fetch_optional(&mut *tx)
-    .await?
-    .is_some();
-    if already_member {
-        return Err(AppError::Conflict("此 Email 已經是成員".into()));
+    .await?;
+    match existing {
+        Some(true) => return Err(AppError::Conflict("此 Email 已經是成員".into())),
+        Some(false) => {
+            return Err(AppError::Conflict(
+                "此成員已停用,請在團隊頁「重新啟用」,不需要再邀請".into(),
+            ));
+        }
+        None => {}
     }
 
     // 邀請會預留一個名額;在鎖內檢查並接著寫入
@@ -284,14 +297,17 @@ async fn change_role(
         return Err(AppError::BadRequest("不能指派擁有者角色".into()));
     }
     let mut tx = ctx.begin(&state).await?;
-    let current: Option<Role> =
-        sqlx::query_scalar("SELECT role FROM memberships WHERE user_id = $1 FOR UPDATE")
+    let current: Option<(Role, bool)> =
+        sqlx::query_as("SELECT role, active FROM memberships WHERE user_id = $1 FOR UPDATE")
             .bind(user_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let current = current.ok_or(AppError::NotFound)?;
+    let (current, active) = current.ok_or(AppError::NotFound)?;
     if current == Role::Owner {
         return Err(AppError::Conflict("擁有者的角色不可變更".into()));
+    }
+    if !active {
+        return Err(AppError::Conflict("此成員已停用,請先重新啟用".into()));
     }
     sqlx::query("UPDATE memberships SET role = $2 WHERE user_id = $1")
         .bind(user_id)
@@ -342,7 +358,9 @@ async fn remove_member(
         Ok(_) => {}
         // bookings 以外鍵參照員工,有預約紀錄的成員不能直接刪除
         Err(e) if pg_code(&e).as_deref() == Some(PG_FOREIGN_KEY_VIOLATION) => {
-            return Err(AppError::Conflict("此成員有預約紀錄,無法移除".into()));
+            return Err(AppError::Conflict(
+                "此成員有預約紀錄,無法移除。請改用「停用」".into(),
+            ));
         }
         Err(e) => return Err(e.into()),
     }
@@ -356,6 +374,100 @@ async fn remove_member(
         ctx.tenant_id,
         Actor::User(ctx.user_id),
         action,
+        "member",
+        Some(user_id),
+        json!({ "role": target }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 停用成員(離職):有預約紀錄的成員不能刪除,改成停用。
+/// 管理者可停用比自己低階的成員,成員也可以停用自己(退出);擁有者不行。
+/// 還有「未來已確認」的預約時不准停用 —— 顧客會撲空;請先取消(顧客會收到通知信)或請顧客改期。
+/// 待確認的預約不擋:它不佔時段,而且顧客確認時會重新檢查,員工已停用就會失敗。
+async fn deactivate_member(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path((_slug, user_id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let mut tx = ctx.begin(&state).await?;
+    let row: Option<(Role, bool)> =
+        sqlx::query_as("SELECT role, active FROM memberships WHERE user_id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (target, active) = row.ok_or(AppError::NotFound)?;
+    if target == Role::Owner {
+        return Err(AppError::Conflict("擁有者無法被停用".into()));
+    }
+    if user_id != ctx.user_id && !ctx.role.can_manage(target) {
+        return Err(AppError::Forbidden);
+    }
+    if !active {
+        return Err(AppError::Conflict("此成員已經停用".into()));
+    }
+    let upcoming: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bookings
+         WHERE staff_user_id = $1 AND status = 'confirmed' AND starts_at > now()",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if upcoming > 0 {
+        return Err(AppError::Conflict(format!(
+            "此成員還有 {upcoming} 筆未來已確認的預約,請先取消(顧客會收到通知)或請顧客改期"
+        )));
+    }
+    sqlx::query("UPDATE memberships SET active = false WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "member.deactivated",
+        "member",
+        Some(user_id),
+        json!({ "role": target, "self": user_id == ctx.user_id }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 重新啟用。要有名額(停用的成員不佔名額,所以回來時要重新檢查方案上限);
+/// 只有管理者以上能做 —— 停用中的成員自己已經進不了這間店。
+async fn reactivate_member(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path((_slug, user_id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let mut tx = ctx.begin(&state).await?;
+    let row: Option<(Role, bool)> =
+        sqlx::query_as("SELECT role, active FROM memberships WHERE user_id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (target, active) = row.ok_or(AppError::NotFound)?;
+    if !ctx.role.can_manage(target) {
+        return Err(AppError::Forbidden);
+    }
+    if active {
+        return Err(AppError::Conflict("此成員已經是啟用狀態".into()));
+    }
+    plan::ensure_staff_slot(&mut tx, ctx.tenant_id).await?;
+    sqlx::query("UPDATE memberships SET active = true WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "member.reactivated",
         "member",
         Some(user_id),
         json!({ "role": target }),

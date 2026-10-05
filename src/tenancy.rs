@@ -84,7 +84,7 @@ impl FromRequestParts<AppState> for TenantCtx {
         let row: Option<(Uuid, Role)> = sqlx::query_as(
             "SELECT t.id, m.role FROM tenants t
              JOIN memberships m ON m.tenant_id = t.id
-             WHERE t.slug = $1 AND m.user_id = $2 AND t.status = 'active'",
+             WHERE t.slug = $1 AND m.user_id = $2 AND m.active AND t.status = 'active'",
         )
         .bind(slug)
         .bind(user.id)

@@ -56,7 +56,7 @@ pub async fn ensure_staff_slot(tx: &mut Tx, tenant_id: Uuid) -> Result<(), AppEr
         return Ok(());
     };
     let used: i64 = sqlx::query_scalar(
-        "SELECT (SELECT count(*) FROM memberships)
+        "SELECT (SELECT count(*) FROM memberships WHERE active)
               + (SELECT count(*) FROM invitations WHERE accepted_at IS NULL AND expires_at > now())",
     )
     .fetch_one(&mut **tx)
@@ -146,7 +146,7 @@ pub struct Usage {
 
 pub async fn usage(tx: &mut Tx, tz: Tz) -> Result<Usage, AppError> {
     let (staff, pending_invitations, services): (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM memberships),
+        "SELECT (SELECT count(*) FROM memberships WHERE active),
                 (SELECT count(*) FROM invitations WHERE accepted_at IS NULL AND expires_at > now()),
                 (SELECT count(*) FROM services WHERE active)",
     )

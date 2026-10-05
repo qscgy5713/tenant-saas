@@ -8,7 +8,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{app, call, create_service, create_tenant, signup, user_id};
+use common::{add_member, app, call, create_service, create_tenant, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::{
@@ -1087,4 +1087,76 @@ async fn resend_only_works_while_the_request_is_still_pending(pool: PgPool) {
         .0,
         StatusCode::OK
     );
+}
+
+/// 申請(待確認)之後,負責的員工離職被停用 → 顧客再來確認時要失敗,
+/// 而不是悄悄把預約確認在一位已經不在的員工身上
+#[sqlx::test]
+async fn confirming_after_the_staff_was_deactivated_fails_cleanly(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    // b 是唯一提供服務的人:owner 不再提供
+    signup(&s.app, "b@example.com").await;
+    add_member(&pool, "shop-a", "b@example.com", "staff").await;
+    let b = user_id(&pool, "b@example.com").await;
+    let hours: Vec<Value> = (0..7)
+        .map(|d| json!({"weekday": d, "start": "09:00", "end": "18:00"}))
+        .collect();
+    for (who, services) in [(b, vec![s.service_id.clone()]), (s.owner_id, vec![])] {
+        call(
+            &s.app,
+            Method::PUT,
+            &format!("/t/shop-a/members/{who}/working-hours"),
+            Some(json!({"hours": hours})),
+            Some(&s.owner),
+        )
+        .await;
+        call(
+            &s.app,
+            Method::PUT,
+            &format!("/t/shop-a/members/{who}/services"),
+            Some(json!({"service_ids": services})),
+            Some(&s.owner),
+        )
+        .await;
+    }
+
+    let (status, _) = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let assigned: Uuid = sqlx::query_scalar("SELECT staff_user_id FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(assigned, b);
+    tick(&pool, &mailer).await.unwrap();
+    let token = token_in(&memory.sent()[0].body);
+
+    // 待確認的預約不擋停用
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{b}/deactivate"),
+        None,
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/confirm"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status_of(&pool, "c@example.com").await, vec!["cancelled"]);
+    let reason: String = sqlx::query_scalar(
+        "SELECT detail->>'reason' FROM audit_logs WHERE action = 'booking.cancelled'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reason, "no_longer_bookable");
 }

@@ -728,6 +728,10 @@
   --row-cols: 1fr auto;
 }
 
+.row-inactive {
+  opacity: 0.7;
+}
+
 .member-id {
   display: flex;
   align-items: center;

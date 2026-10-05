@@ -126,7 +126,7 @@ async fn list_tenants(
     let rows = sqlx::query_as::<_, TenantResponse>(
         "SELECT t.id, t.slug, t.name, t.timezone, m.role
          FROM memberships m JOIN tenants t ON t.id = m.tenant_id
-         WHERE m.user_id = $1 AND t.status = 'active'
+         WHERE m.user_id = $1 AND m.active AND t.status = 'active'
          ORDER BY t.name",
     )
     .bind(auth.id)
@@ -167,6 +167,8 @@ struct MemberResponse {
     name: String,
     email: String,
     role: Role,
+    /// false = 已停用(離職):不能再存取這間店、不能被預約,歷史紀錄保留
+    active: bool,
 }
 
 async fn list_members(
@@ -176,9 +178,9 @@ async fn list_members(
     let mut tx = ctx.begin(&state).await?;
     // 不手動加 WHERE tenant_id:租戶範圍完全由 RLS 決定
     let rows = sqlx::query_as::<_, MemberResponse>(
-        "SELECT u.id AS user_id, u.name, u.email::text AS email, m.role
+        "SELECT u.id AS user_id, u.name, u.email::text AS email, m.role, m.active
          FROM memberships m JOIN users u ON u.id = m.user_id
-         ORDER BY u.name",
+         ORDER BY m.active DESC, u.name",
     )
     .fetch_all(&mut *tx)
     .await?;

@@ -13,6 +13,8 @@ const ACTION_LABEL: Record<string, string> = {
   'member.role_changed': '變更角色',
   'member.removed': '移除成員',
   'member.left': '退出團隊',
+  'member.deactivated': '停用成員',
+  'member.reactivated': '重新啟用成員',
   'time_off.created': '新增休假',
   'time_off.deleted': '刪除休假',
   'invitation.created': '發出邀請',
@@ -90,6 +92,13 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
     }
     case 'member.role_changed':
       return `${ROLE[str(d.from) ?? ''] ?? d.from} → ${ROLE[str(d.to) ?? ''] ?? d.to}`
+    case 'member.deactivated':
+      return d.self === true
+        ? '本人退出'
+        : str(d.role)
+          ? `角色:${ROLE[str(d.role)!] ?? d.role}`
+          : null
+    case 'member.reactivated':
     case 'member.removed':
       return str(d.role) ? `角色:${ROLE[str(d.role)!] ?? d.role}` : null
     case 'invitation.created':

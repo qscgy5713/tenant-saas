@@ -178,6 +178,7 @@ async fn service_staff(
     booking::active_service(&mut tx, service_id).await?;
     let rows = sqlx::query_as::<_, PublicStaff>(
         "SELECT u.id, u.name FROM staff_services ss JOIN users u ON u.id = ss.user_id
+         JOIN memberships m ON m.user_id = ss.user_id AND m.active
          WHERE ss.service_id = $1 ORDER BY u.name, u.id",
     )
     .bind(service_id)

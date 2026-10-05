@@ -28,6 +28,8 @@ export interface Member {
   name: string
   email: string
   role: Role
+  /** false = 已停用(離職):進不了這家店、不能被預約,歷史紀錄保留 */
+  active: boolean
 }
 
 export interface AdminService {

@@ -7,7 +7,7 @@ import { renderApp } from '../test/render'
 import { API, error, server, standardSlots, taipei } from '../test/server'
 import { SHOP, USER, loginAs, mockShopMe, preloadAdmin, spy } from '../test/admin'
 import * as redirect from '../lib/redirect'
-import { canEditSchedule, canRemove } from './permissions'
+import { canDeactivate, canEditSchedule, canReactivate, canRemove } from './permissions'
 import type { AdminBooking, AdminService, Member } from './types'
 
 beforeAll(preloadAdmin)
@@ -46,6 +46,7 @@ const member = (over: Partial<Member>): Member => ({
   name: '成員',
   email: 'm@example.com',
   role: 'staff',
+  active: true,
   ...over,
 })
 
@@ -74,6 +75,23 @@ describe('權限:canRemove 與後端 Role::can_manage 一致', () => {
   it('staff 不能移除別人,但可以自己退出', () => {
     expect(canRemove(me('staff'), member({ role: 'staff' }))).toBe(false)
     expect(canRemove(me('staff'), member({ user_id: 'me', role: 'staff' }))).toBe(true)
+  })
+  it('canDeactivate:規則同 canRemove,而且對象要是啟用中;可以停用自己(退出)', () => {
+    expect(canDeactivate(me('owner'), member({ role: 'staff' }))).toBe(true)
+    expect(canDeactivate(me('owner'), member({ role: 'staff', active: false }))).toBe(false)
+    expect(canDeactivate(me('owner'), member({ user_id: 'me', role: 'owner' }))).toBe(false)
+    expect(canDeactivate(me('manager'), member({ role: 'manager' }))).toBe(false)
+    expect(canDeactivate(me('staff'), member({ role: 'staff' }))).toBe(false)
+    expect(canDeactivate(me('staff'), member({ user_id: 'me', role: 'staff' }))).toBe(true)
+  })
+  it('canReactivate:只有管理者以上;對象要是停用中;不是自己', () => {
+    const gone = (over: Partial<Member> = {}) => member({ role: 'staff', active: false, ...over })
+    expect(canReactivate(me('owner'), gone())).toBe(true)
+    expect(canReactivate(me('manager'), gone())).toBe(true)
+    expect(canReactivate(me('manager'), gone({ role: 'manager' }))).toBe(false)
+    expect(canReactivate(me('staff'), gone())).toBe(false)
+    expect(canReactivate(me('owner'), member({ role: 'staff' }))).toBe(false) // 本來就啟用
+    expect(canReactivate(me('owner'), gone({ user_id: 'me' }))).toBe(false)
   })
   it('canEditSchedule:管理者以上,或本人', () => {
     expect(canEditSchedule(me('owner'), 'x')).toBe(true)
@@ -837,6 +855,163 @@ describe('團隊', () => {
     expect(
       within(screen.getByText('經理').closest('li')!).queryByRole('button', { name: '移除' }),
     ).not.toBeInTheDocument()
+  })
+
+  describe('停用 / 重新啟用', () => {
+    const roster = (leftActive = true) => [
+      member({
+        user_id: 'u-owner',
+        name: '林美玲',
+        email: 'owner@demo.example.com',
+        role: 'owner',
+      }),
+      member({ user_id: 'u-staff', name: '小安', role: 'staff', active: leftActive }),
+    ]
+    const serve = (list: () => Member[]) =>
+      server.use(
+        http.get(`${API}/t/demo-salon/members`, () => HttpResponse.json(list())),
+        http.get(`${API}/t/demo-salon/invitations`, () => HttpResponse.json([])),
+      )
+
+    it('owner 停用員工:先確認 → 送出 → 列表標示「已停用」,角色下拉消失,出現「重新啟用」', async () => {
+      mockShopMe('owner')
+      let active = true
+      serve(() => roster(active))
+      const s = spy<unknown>()
+      server.use(
+        http.post(`${API}/t/demo-salon/members/u-staff/deactivate`, async ({ request }) => {
+          await s.record(request)
+          active = false
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      const row = () => screen.getByText('小安').closest('li')!
+      await screen.findByText('小安')
+      expect(within(row()).getByRole('combobox', { name: '小安 的角色' })).toBeInTheDocument()
+
+      await user.click(within(row()).getByRole('button', { name: '停用' }))
+      const dialog = await screen.findByRole('dialog')
+      expect(s.calls).toHaveLength(0) // 還沒確認
+      expect(within(dialog).getByText(/歷史預約與紀錄會保留/)).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: '停用' }))
+
+      await waitFor(() => expect(within(row()).getByText('已停用')).toBeInTheDocument())
+      expect(s.calls).toHaveLength(1)
+      expect(within(row()).queryByRole('combobox')).not.toBeInTheDocument()
+      expect(within(row()).queryByRole('button', { name: '停用' })).not.toBeInTheDocument()
+      expect(within(row()).getByRole('button', { name: '重新啟用' })).toBeInTheDocument()
+      expect(within(row()).getByRole('button', { name: '移除' })).toBeInTheDocument()
+    })
+
+    it('還有未來已確認的預約 → 後端拒絕,原因顯示在確認視窗裡,視窗不關', async () => {
+      mockShopMe('owner')
+      serve(() => roster())
+      server.use(
+        http.post(`${API}/t/demo-salon/members/u-staff/deactivate`, () =>
+          error(409, '此成員還有 2 筆未來已確認的預約,請先取消(顧客會收到通知)或請顧客改期'),
+        ),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      await user.click(
+        within((await screen.findByText('小安')).closest('li')!).getByRole('button', {
+          name: '停用',
+        }),
+      )
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: '停用' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        '還有 2 筆未來已確認的預約',
+      )
+      expect(dialog).toHaveAttribute('open')
+      expect(screen.queryByText('已停用')).not.toBeInTheDocument()
+    })
+
+    it('重新啟用:送出後恢復;名額不足(402)時顯示原因', async () => {
+      mockShopMe('owner')
+      let active = false
+      serve(() => roster(active))
+      let mode: 'full' | 'ok' = 'full'
+      const s = spy<unknown>()
+      server.use(
+        http.post(`${API}/t/demo-salon/members/u-staff/reactivate`, async ({ request }) => {
+          await s.record(request)
+          if (mode === 'full') return error(402, '已達「免費版」方案的成員人數上限(2),請升級方案')
+          active = true
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      const row = () => screen.getByText('小安').closest('li')!
+      await user.click(
+        await within((await screen.findByText('小安')).closest('li')!).findByRole('button', {
+          name: '重新啟用',
+        }),
+      )
+      expect(await screen.findByText(/成員人數上限/)).toBeInTheDocument()
+      expect(within(row()).getByText('已停用')).toBeInTheDocument()
+
+      mode = 'ok'
+      await user.click(within(row()).getByRole('button', { name: '重新啟用' }))
+      await waitFor(() => expect(within(row()).queryByText('已停用')).not.toBeInTheDocument())
+      expect(s.calls).toHaveLength(2)
+    })
+
+    it('manager:員工有「停用」與「移除」,同階的管理者兩個都沒有;staff 只能「退出團隊」自己', async () => {
+      mockShopMe('manager')
+      serve(() => [...roster(), member({ user_id: 'u-mgr2', name: '另一位經理', role: 'manager' })])
+      renderApp('/admin/demo-salon/team')
+      await screen.findByText('小安')
+      const staffRow = screen.getByText('小安').closest('li')!
+      expect(within(staffRow).getByRole('button', { name: '停用' })).toBeInTheDocument()
+      expect(within(staffRow).getByRole('button', { name: '移除' })).toBeInTheDocument()
+      const peer = screen.getByText('另一位經理').closest('li')!
+      expect(
+        within(peer).queryByRole('button', { name: /停用|移除|重新啟用/ }),
+      ).not.toBeInTheDocument()
+    })
+
+    it('自己「退出團隊」= 停用自己(保留歷史),成功後回到店家列表', async () => {
+      const me = { id: 'u-me', email: 'me@demo.example.com', name: '小我' }
+      loginAs(me)
+      mockShopMe('staff')
+      serve(() => [
+        member({
+          user_id: 'u-owner',
+          name: '林美玲',
+          email: 'owner@demo.example.com',
+          role: 'owner',
+        }),
+        member({ user_id: me.id, name: me.name, email: me.email, role: 'staff' }),
+      ])
+      const s = spy<unknown>()
+      let removed = 0
+      server.use(
+        http.post(`${API}/t/demo-salon/members/${me.id}/deactivate`, async ({ request }) => {
+          await s.record(request)
+          return new HttpResponse(null, { status: 204 })
+        }),
+        http.delete(
+          `${API}/t/demo-salon/members/${me.id}`,
+          () => ((removed += 1), error(409, 'x')),
+        ),
+        http.get(`${API}/tenants`, () => HttpResponse.json([])),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      const mine = (await screen.findByText(me.email)).closest('li')!
+      expect(within(mine).queryByRole('button', { name: '移除' })).not.toBeInTheDocument()
+      await user.click(within(mine).getByRole('button', { name: '退出團隊' }))
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getByText(/管理者可以讓你重新加入/)).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: '退出' }))
+      expect(await screen.findByRole('heading', { name: '我的店家' })).toBeInTheDocument()
+      expect(s.calls).toHaveLength(1)
+      expect(removed).toBe(0)
+    })
   })
 
   it('改角色:送出選的角色', async () => {

@@ -148,6 +148,13 @@ export const changeRole = (slug: string, userId: string, role: Exclude<Role, 'ow
 export const removeMember = (slug: string, userId: string) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}`, { method: 'DELETE' })
 
+/** 停用(離職):保留歷史紀錄;還有未來已確認的預約時後端會拒絕 */
+export const deactivateMember = (slug: string, userId: string) =>
+  call<void>(`/t/${enc(slug)}/members/${enc(userId)}/deactivate`, { method: 'POST' })
+
+export const reactivateMember = (slug: string, userId: string) =>
+  call<void>(`/t/${enc(slug)}/members/${enc(userId)}/reactivate`, { method: 'POST' })
+
 export const listInvitations = (slug: string) => call<Invitation[]>(`/t/${enc(slug)}/invitations`)
 
 export const createInvitation = (slug: string, email: string, role: Exclude<Role, 'owner'>) =>

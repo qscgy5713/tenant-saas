@@ -1435,3 +1435,129 @@ async fn unverified_and_past_bookings_send_no_cancel_mail(pool: PgPool) {
 
     assert!(cancel_mails(&pool).await.is_empty());
 }
+
+// ---------- 員工停用與預約 ----------
+
+async fn deactivate(s: &Shop, user: Uuid) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{user}/deactivate"),
+        None,
+        Some(&s.owner),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn deactivated_staff_is_not_listed_or_bookable_until_reactivated(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let staff_uri = format!("/public/shops/shop-a/services/{}/staff", s.service_id);
+    let names = |v: Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, before) = call(&s.app, Method::GET, &staff_uri, None, None).await;
+    assert!(names(before).contains(&b_id.to_string()));
+
+    assert_eq!(deactivate(&s, b_id).await.0, StatusCode::NO_CONTENT);
+
+    // 顧客看不到他,也指定不了他
+    let (_, after) = call(&s.app, Method::GET, &staff_uri, None, None).await;
+    let after = names(after);
+    assert!(!after.contains(&b_id.to_string()), "{after:?}");
+    assert_eq!(after.len(), 1);
+    let (status, body) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    assert!(
+        status.is_client_error(),
+        "停用的員工不能被預約: {status} {body}"
+    );
+
+    // 不指定人員時,系統自動分配也不會挑到他:同一時段訂兩筆,第二筆因為只剩一位員工而失敗
+    let (s1, _) = book(&s.app, &s, None, at(day(3), 11, 0), "d@example.com").await;
+    assert_eq!(s1, StatusCode::CREATED);
+    let (s2, _) = book(&s.app, &s, None, at(day(3), 11, 0), "e@example.com").await;
+    assert_eq!(s2, StatusCode::CONFLICT);
+
+    // 重新啟用 → 回來了
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{b_id}/reactivate"),
+        None,
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[sqlx::test]
+async fn staff_with_upcoming_confirmed_bookings_cannot_be_deactivated(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    let (status, body) = deactivate(&s, b_id).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["error"].as_str().unwrap().contains("1 筆"), "{body}");
+
+    // 待確認的不擋(不佔時段,顧客確認時會重新檢查);已經過去的也不擋
+    sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = $1::uuid")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, past) = book(&s.app, &s, Some(b_id), at(day(5), 10, 0), "d@example.com").await;
+    sqlx::query("UPDATE bookings SET starts_at = now() - interval '2 hours', ends_at = now() - interval '1 hour' WHERE id = $1::uuid")
+        .bind(past["id"].as_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(deactivate(&s, b_id).await.0, StatusCode::NO_CONTENT);
+
+    // 歷史預約仍看得到,員工名稱還在
+    let (_, list) = call(
+        &s.app,
+        Method::GET,
+        "/t/shop-a/bookings?limit=100",
+        None,
+        Some(&s.owner),
+    )
+    .await;
+    let staff_names: Vec<_> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["staff_name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(staff_names.len(), 2, "{list}");
+    assert!(staff_names.iter().all(|n| n == "小明"), "{staff_names:?}");
+
+    // 待確認的預約沒有被偷偷改派給別人;顧客之後來確認會失敗,見 tests/worker.rs 的
+    // confirming_after_the_staff_was_deactivated_fails_cleanly
+    let staff: Uuid = sqlx::query_scalar("SELECT staff_user_id FROM bookings WHERE id = $1::uuid")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(staff, b_id);
+}
+
+#[sqlx::test]
+async fn cancelling_first_makes_deactivation_possible(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    assert_eq!(deactivate(&s, b_id).await.0, StatusCode::CONFLICT);
+
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(cancel_as(&s, &s.owner, id).await.0, StatusCode::OK);
+    assert_eq!(deactivate(&s, b_id).await.0, StatusCode::NO_CONTENT);
+}

@@ -429,3 +429,252 @@ async fn change_role_and_remove_members(pool: PgPool) {
         "已經不是成員"
     );
 }
+
+// ---------- 停用(離職) ----------
+
+async fn post_member(
+    app: &Router,
+    token: &str,
+    user: uuid::Uuid,
+    action: &str,
+) -> (StatusCode, Value) {
+    call(
+        app,
+        Method::POST,
+        &format!("/t/shop-a/members/{user}/{action}"),
+        None,
+        Some(token),
+    )
+    .await
+}
+
+async fn member_list(app: &Router, token: &str) -> Vec<Value> {
+    let (status, body) = call(app, Method::GET, "/t/shop-a/members", None, Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array().unwrap().clone()
+}
+
+#[sqlx::test]
+async fn deactivated_member_loses_access_but_history_stays(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    let staff = signup(&app, "b@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "b@example.com", "staff").await;
+    let b = user_id(&pool, "b@example.com").await;
+
+    let me = |t: &str| {
+        let (app, t) = (app.clone(), t.to_string());
+        async move {
+            call(&app, Method::GET, "/t/shop-a/me", None, Some(&t))
+                .await
+                .0
+        }
+    };
+    assert_eq!(me(&staff).await, StatusCode::OK);
+
+    assert_eq!(
+        post_member(&app, &owner, b, "deactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+
+    // 進不了這間店,店家也不在他的清單裡 —— 但帳號還在(其他店不受影響)
+    assert_eq!(me(&staff).await, StatusCode::NOT_FOUND);
+    let (_, shops) = call(&app, Method::GET, "/tenants", None, Some(&staff)).await;
+    assert!(shops.as_array().unwrap().is_empty(), "{shops}");
+    assert_eq!(
+        call(&app, Method::GET, "/auth/me", None, Some(&staff))
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // 成員清單仍列出他(標示停用,排在啟用的後面),稽核有紀錄
+    let list = member_list(&app, &owner).await;
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["email"], "a@example.com");
+    assert_eq!(
+        (list[1]["email"].as_str(), list[1]["active"].as_bool()),
+        (Some("b@example.com"), Some(false))
+    );
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = 'member.deactivated'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 1);
+
+    // 重新啟用 → 回來了
+    assert_eq!(
+        post_member(&app, &owner, b, "reactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(me(&staff).await, StatusCode::OK);
+    assert_eq!(member_list(&app, &owner).await[1]["active"], true);
+}
+
+#[sqlx::test]
+async fn who_may_deactivate_whom(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    let manager = signup(&app, "m@example.com").await;
+    signup(&app, "m2@example.com").await;
+    let staff = signup(&app, "s@example.com").await;
+    let staff2 = signup(&app, "s2@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    set_plan(&pool, "shop-a", "business").await; // 名額不是這個測試要測的
+    for (email, role) in [
+        ("m@example.com", "manager"),
+        ("m2@example.com", "manager"),
+        ("s@example.com", "staff"),
+        ("s2@example.com", "staff"),
+    ] {
+        add_member(&pool, "shop-a", email, role).await;
+    }
+    let id = |e: &'static str| {
+        let pool = pool.clone();
+        async move { user_id(&pool, e).await }
+    };
+    let (a, m2, s, s2) = (
+        id("a@example.com").await,
+        id("m2@example.com").await,
+        id("s@example.com").await,
+        id("s2@example.com").await,
+    );
+
+    // 擁有者不能被停用(誰都不行,包括自己)
+    assert_eq!(
+        post_member(&app, &owner, a, "deactivate").await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        post_member(&app, &manager, a, "deactivate").await.0,
+        StatusCode::CONFLICT
+    );
+    // 員工不能停用別人;管理者不能停用同階的管理者
+    assert_eq!(
+        post_member(&app, &staff, s2, "deactivate").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        post_member(&app, &manager, m2, "deactivate").await.0,
+        StatusCode::FORBIDDEN
+    );
+    // 不存在的成員
+    assert_eq!(
+        post_member(&app, &owner, uuid::Uuid::new_v4(), "deactivate")
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // 管理者可以停用員工;員工可以停用自己(退出)
+    assert_eq!(
+        post_member(&app, &manager, s, "deactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        post_member(&app, &staff2, s2, "deactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+    // 重複停用
+    assert_eq!(
+        post_member(&app, &owner, s, "deactivate").await.0,
+        StatusCode::CONFLICT
+    );
+
+    // 重新啟用:只有管理者以上;員工自己停用了就進不來,也不能自己回來
+    assert_eq!(
+        post_member(&app, &staff2, s2, "reactivate").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post_member(&app, &manager, m2, "reactivate").await.0,
+        StatusCode::FORBIDDEN,
+        "同階的管理者不能動"
+    );
+    assert_eq!(
+        post_member(&app, &owner, m2, "reactivate").await.0,
+        StatusCode::CONFLICT,
+        "本來就是啟用狀態"
+    );
+    assert_eq!(
+        post_member(&app, &manager, s, "reactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[sqlx::test]
+async fn deactivated_members_do_not_use_up_plan_seats(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    let _b = signup(&app, "b@example.com").await;
+    let c = signup(&app, "c@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "b@example.com", "staff").await;
+    let b_id = user_id(&pool, "b@example.com").await;
+    // 免費版 2 人:擁有者 + b 已滿
+    assert_eq!(
+        invite(&app, &owner, "shop-a", "c@example.com", "staff")
+            .await
+            .0,
+        StatusCode::PAYMENT_REQUIRED
+    );
+
+    // 停用 b → 空出一個名額
+    post_member(&app, &owner, b_id, "deactivate").await;
+    let (status, inv) = invite(&app, &owner, "shop-a", "c@example.com", "staff").await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        accept(&app, &c, inv["token"].as_str().unwrap()).await.0,
+        StatusCode::OK,
+        "接受邀請時也只算啟用中的成員"
+    );
+
+    // 名額被 c 用掉了 → b 不能直接回來
+    let (status, _) = post_member(&app, &owner, b_id, "reactivate").await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    // 方案頁的用量也只算啟用中的
+    let (_, plan) = call(&app, Method::GET, "/t/shop-a/plan", None, Some(&owner)).await;
+    assert_eq!(plan["usage"]["staff"], 2);
+
+    // 升級後就可以
+    set_plan(&pool, "shop-a", "pro").await;
+    assert_eq!(
+        post_member(&app, &owner, b_id, "reactivate").await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[sqlx::test]
+async fn deactivated_members_cannot_be_invited_or_promoted_and_delete_points_to_deactivate(
+    pool: PgPool,
+) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    signup(&app, "b@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    set_plan(&pool, "shop-a", "business").await;
+    add_member(&pool, "shop-a", "b@example.com", "staff").await;
+    let b = user_id(&pool, "b@example.com").await;
+    post_member(&app, &owner, b, "deactivate").await;
+
+    // 再邀請他 → 告訴你該按「重新啟用」,不是含糊的「已經是成員」
+    let (status, body) = invite(&app, &owner, "shop-a", "b@example.com", "staff").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["error"].as_str().unwrap().contains("重新啟用"),
+        "{body}"
+    );
+
+    // 停用中不能改角色
+    let (status, _) = call(
+        &app,
+        Method::PATCH,
+        &format!("/t/shop-a/members/{b}"),
+        Some(json!({"role": "manager"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
