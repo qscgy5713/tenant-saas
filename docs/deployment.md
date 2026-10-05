@@ -108,7 +108,7 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 | `AUTH_RATE_LIMIT_PER_MIN` | | 10 | 註冊 / 登入,每來源 |
 | `TRUST_PROXY` | | false | 見下方「反向代理」 |
 | `STRIPE_SECRET_KEY` | | 空 = 不啟用 | 與 `STRIPE_WEBHOOK_SECRET` 必須同時設定,且至少一個 `STRIPE_PRICE_*`,否則拒絕啟動 |
-| `STRIPE_WEBHOOK_SECRET` | | — | Stripe Dashboard 的 webhook 簽署密鑰(`whsec_…`);webhook 網址 `https://<api>/webhooks/stripe`,訂閱事件 `customer.subscription.created/updated/deleted` |
+| `STRIPE_WEBHOOK_SECRET` | | — | Stripe Dashboard 的 webhook 簽署密鑰(`whsec_…`);webhook 網址 `https://<api>/webhooks/stripe`,訂閱事件 `customer.subscription.created/updated/deleted` 與 `invoice.payment_failed`(付款失敗通知信;沒訂閱這個事件就不會寄) |
 | `STRIPE_PRICE_PRO`、`STRIPE_PRICE_BUSINESS` | | — | 對應方案的 Stripe Price id;沒設的方案不能線上訂閱 |
 | `STRIPE_API_BASE` | | `https://api.stripe.com` | 測試時指向 `stripe-mock` |
 | `METRICS_TOKEN` | | 空 = 關閉 | ≥ 16 字元;設定後才有 `GET /metrics` |

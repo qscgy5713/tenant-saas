@@ -28,6 +28,7 @@ const ACTION_LABEL: Record<string, string> = {
   'booking.notes_updated': '更新預約備註',
   'billing.checkout_started': '開始線上訂閱',
   'billing.plan_changed': '方案變更',
+  'billing.payment_failed': '訂閱扣款失敗',
 }
 
 const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }
@@ -104,6 +105,12 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
       return str(d.starts_at) ? `預約時間:${formatDateTime(str(d.starts_at)!, timeZone)}` : null
     case 'billing.checkout_started':
       return str(d.plan) ? `選擇方案:${PLAN_NAME[str(d.plan)!] ?? str(d.plan)}` : null
+    case 'billing.payment_failed':
+      return num(d.attempt) === null
+        ? null
+        : d.final === true
+          ? `第 ${num(d.attempt)} 次嘗試失敗,不會再重試`
+          : `第 ${num(d.attempt)} 次嘗試失敗,Stripe 會再試`
     case 'billing.plan_changed': {
       const from = str(d.from)
       const to = str(d.to)

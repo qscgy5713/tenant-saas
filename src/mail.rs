@@ -228,6 +228,35 @@ pub fn account_locked(to: &str) -> Email {
     }
 }
 
+/// 付款頁網址的樣板:`{slug}` 由資料庫代入(webhook 進來時還不知道是哪間店)
+pub fn plan_link_template(base_url: &str) -> String {
+    format!("{}/admin/{{slug}}/plan", base(base_url))
+}
+
+/// 扣款失敗通知(標題, 內容)。`{shop}` `{slug}` `{next_date}` 由資料庫代入。
+/// `will_retry` 為 false 表示 Stripe 不會再試了。
+pub fn payment_failed(
+    amount: &str,
+    attempt: i32,
+    will_retry: bool,
+    plan_link: &str,
+) -> (String, String) {
+    let outcome = if will_retry {
+        "Stripe 會在 {next_date} 前後自動再試一次。在付款恢復之前,方案維持不變;\
+         如果持續失敗,店家會退回免費版。"
+    } else {
+        "這是最後一次嘗試,Stripe 不會再自動重試。如果沒有更新付款方式,店家會退回免費版。"
+    };
+    (
+        "「{shop}」的訂閱扣款失敗".to_string(),
+        format!(
+            "您好,\n\n「{{shop}}」的訂閱扣款失敗(金額 {amount},第 {attempt} 次嘗試)。\n\n\
+             {outcome}\n\n\
+             請盡快到下列頁面,從「管理付款」更新信用卡:\n\n  {plan_link}\n"
+        ),
+    )
+}
+
 pub fn invitation(to: &str, shop: &str, role: &str, link: &str) -> Email {
     Email {
         to: to.to_string(),

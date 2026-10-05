@@ -247,8 +247,54 @@ pub struct SubscriptionEvent {
     pub cancel_at_period_end: bool,
 }
 
+/// 一次扣款失敗(invoice.payment_failed)
+#[derive(Debug, PartialEq)]
+pub struct PaymentFailure {
+    pub event_id: String,
+    pub kind: String,
+    pub customer: String,
+    pub invoice: String,
+    /// 金額,Stripe 的最小單位(TWD / USD 是「分」,JPY 等是元)
+    pub amount_due: i64,
+    pub currency: String,
+    /// 這是第幾次嘗試
+    pub attempt: i32,
+    /// Stripe 下一次重試的時間;None = 不會再試了(最後一次)
+    pub next_attempt: Option<i64>,
+}
+
+/// 把 Stripe 的最小單位金額轉成人看得懂的字串,例如 150000 / twd → `TWD 1,500.00`
+pub fn format_amount(amount: i64, currency: &str) -> String {
+    // Stripe 沒有小數位的幣別(其餘都是 2 位)
+    const ZERO_DECIMAL: &[&str] = &[
+        "bif", "clp", "djf", "gnf", "jpy", "kmf", "krw", "mga", "pyg", "rwf", "ugx", "vnd", "vuv",
+        "xaf", "xof", "xpf",
+    ];
+    let code = currency.to_ascii_uppercase();
+    let sign = if amount < 0 { "-" } else { "" };
+    let abs = amount.unsigned_abs();
+    let (whole, frac) = if ZERO_DECIMAL.contains(&currency.to_ascii_lowercase().as_str()) {
+        (abs, None)
+    } else {
+        (abs / 100, Some(abs % 100))
+    };
+    let digits = whole.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    match frac {
+        Some(f) => format!("{code} {sign}{grouped}.{f:02}"),
+        None => format!("{code} {sign}{grouped}"),
+    }
+}
+
 pub enum Parsed {
     Subscription(SubscriptionEvent),
+    PaymentFailed(PaymentFailure),
     /// 與方案無關的事件:收下並回 200,Stripe 才不會一直重送
     Ignored,
 }
@@ -266,14 +312,30 @@ pub fn parse_event(
     let event: Value =
         serde_json::from_slice(raw).map_err(|e| format!("事件不是有效的 JSON: {e}"))?;
     let kind = event["type"].as_str().ok_or("事件缺少 type")?;
-    if !SUBSCRIPTION_EVENTS.contains(&kind) {
-        return Ok(Parsed::Ignored);
-    }
     let text = |v: &Value, what: &str| {
         v.as_str()
             .map(str::to_string)
-            .ok_or_else(|| format!("訂閱事件缺少 {what}"))
+            .ok_or_else(|| format!("事件缺少 {what}"))
     };
+    if kind == "invoice.payment_failed" {
+        let inv = &event["data"]["object"];
+        return Ok(Parsed::PaymentFailed(PaymentFailure {
+            event_id: text(&event["id"], "id")?,
+            kind: kind.to_string(),
+            customer: text(&inv["customer"], "customer")?,
+            invoice: text(&inv["id"], "invoice id")?,
+            amount_due: inv["amount_due"].as_i64().ok_or("發票缺少 amount_due")?,
+            currency: text(&inv["currency"], "currency")?,
+            attempt: inv["attempt_count"]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(1),
+            next_attempt: inv["next_payment_attempt"].as_i64(),
+        }));
+    }
+    if !SUBSCRIPTION_EVENTS.contains(&kind) {
+        return Ok(Parsed::Ignored);
+    }
     let obj = &event["data"]["object"];
     let item = &obj["items"]["data"][0];
     let price = item["price"]["id"].as_str();

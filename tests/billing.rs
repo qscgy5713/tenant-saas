@@ -19,7 +19,9 @@ use sqlx::PgPool;
 use tenant_saas::{
     billing::{self, SignatureError},
     config::{Config, StripeConfig, parse_stripe},
+    mail::{Mailer, MemoryMailer},
     routes::{self, AppState},
+    worker::tick,
 };
 use tower::ServiceExt;
 
@@ -822,4 +824,195 @@ async fn tenants_and_their_members_cannot_touch_billing_tables(pool: PgPool) {
         err.as_database_error().and_then(|e| e.code()).as_deref(),
         Some("42501")
     );
+}
+
+// ---------- 付款失敗通知 ----------
+
+fn payment_failed_event(id: &str, customer: &str, attempt: i64, next: Option<i64>) -> Value {
+    json!({
+        "id": id, "type": "invoice.payment_failed", "created": 1_700_000_000,
+        "data": {"object": {
+            "id": "in_1", "customer": customer, "amount_due": 150_000, "currency": "twd",
+            "attempt_count": attempt, "next_payment_attempt": next
+        }}
+    })
+}
+
+/// 寄出佇列裡的信,回傳 (收件者, 標題, 內容)
+async fn deliver(pool: &PgPool) -> Vec<(String, String, String)> {
+    let memory = MemoryMailer::new();
+    tick(pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    memory
+        .sent()
+        .into_iter()
+        .map(|m| (m.to, m.subject, m.body))
+        .collect()
+}
+
+async fn payment_failed_audits(pool: &PgPool) -> Vec<Value> {
+    sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action = 'billing.payment_failed'")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[test]
+fn amounts_are_formatted_by_currency() {
+    assert_eq!(billing::format_amount(150_000, "twd"), "TWD 1,500.00");
+    assert_eq!(billing::format_amount(5, "usd"), "USD 0.05");
+    assert_eq!(billing::format_amount(0, "usd"), "USD 0.00");
+    assert_eq!(
+        billing::format_amount(123_456_789, "usd"),
+        "USD 1,234,567.89"
+    );
+    assert_eq!(billing::format_amount(100_000, "USD"), "USD 1,000.00");
+    // 沒有小數位的幣別不能除以 100
+    assert_eq!(billing::format_amount(1500, "jpy"), "JPY 1,500");
+    assert_eq!(billing::format_amount(999, "jpy"), "JPY 999");
+    assert_eq!(billing::format_amount(-250, "usd"), "USD -2.50");
+}
+
+#[sqlx::test]
+async fn failed_payment_notifies_only_the_owners_and_leaves_the_plan_alone(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    send_event(
+        &s.app,
+        sub_event(
+            "evt_sub",
+            "customer.subscription.created",
+            100,
+            "cus_123",
+            "active",
+            "price_pro",
+        ),
+    )
+    .await;
+    assert_eq!(plan_of(&s.pool).await, "pro");
+    // 另一位店主與一位員工:店主都要收到,員工不用
+    signup(&s.app, "owner2@example.com").await;
+    add_member(&s.pool, "shop-a", "owner2@example.com", "owner").await;
+    signup(&s.app, "staff@example.com").await;
+    add_member(&s.pool, "shop-a", "staff@example.com", "staff").await;
+    deliver(&s.pool).await; // 清掉先前的信
+
+    let (status, body) = send_event(
+        &s.app,
+        payment_failed_event("evt_fail_1", "cus_123", 2, Some(1_800_000_000)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["result"], "applied");
+
+    let mut sent = deliver(&s.pool).await;
+    sent.sort();
+    let recipients: Vec<_> = sent.iter().map(|m| m.0.as_str()).collect();
+    assert_eq!(recipients, ["owner2@example.com", "owner@example.com"]);
+    let (_, subject, text) = &sent[0];
+    assert!(subject.contains("店 shop-a"), "{subject}");
+    assert!(text.contains("TWD 1,500.00"), "{text}");
+    assert!(text.contains("第 2 次"), "{text}");
+    assert!(text.contains("2027-01-15"), "{text}");
+    assert!(text.contains("http://app.test/admin/shop-a/plan"), "{text}");
+    assert!(!text.contains('{'), "樣板的代入欄位沒有被取代: {text}");
+
+    // 通知本身不改方案(方案跟著訂閱事件走)
+    assert_eq!(plan_of(&s.pool).await, "pro");
+    assert_eq!(
+        payment_failed_audits(&s.pool).await,
+        [json!({"attempt": 2, "final": false})]
+    );
+}
+
+#[sqlx::test]
+async fn redelivered_failure_event_sends_one_mail_and_one_audit(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    let ev = payment_failed_event("evt_fail_1", "cus_123", 1, Some(1_800_000_000));
+    assert_eq!(send_event(&s.app, ev.clone()).await.1["result"], "applied");
+    assert_eq!(send_event(&s.app, ev).await.1["result"], "duplicate");
+
+    assert_eq!(deliver(&s.pool).await.len(), 1);
+    assert_eq!(payment_failed_audits(&s.pool).await.len(), 1);
+    // 同一張發票的下一次嘗試是不同的事件,要再通知一次
+    send_event(
+        &s.app,
+        payment_failed_event("evt_fail_2", "cus_123", 2, Some(1_800_000_000)),
+    )
+    .await;
+    assert_eq!(deliver(&s.pool).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn last_attempt_says_so_and_has_no_retry_date(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    send_event(
+        &s.app,
+        payment_failed_event("evt_final", "cus_123", 4, None),
+    )
+    .await;
+    let sent = deliver(&s.pool).await;
+    assert_eq!(sent.len(), 1);
+    let text = &sent[0].2;
+    assert!(text.contains("最後一次"), "{text}");
+    assert!(!text.contains("再試一次"), "{text}");
+    assert!(!text.contains('{'), "{text}");
+    assert_eq!(
+        payment_failed_audits(&s.pool).await,
+        [json!({"attempt": 4, "final": true})]
+    );
+}
+
+#[sqlx::test]
+async fn failure_for_a_stranger_or_a_malformed_event_sends_nothing(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    // 不是我們的客戶:收下(200),不寄信、不寫稽核
+    let (status, body) = send_event(
+        &s.app,
+        payment_failed_event("evt_s", "cus_stranger", 1, None),
+    )
+    .await;
+    assert_eq!(
+        (status, body["result"].as_str()),
+        (StatusCode::OK, Some("unknown_customer"))
+    );
+    assert!(deliver(&s.pool).await.is_empty());
+    assert!(payment_failed_audits(&s.pool).await.is_empty());
+
+    // 缺少必要欄位:400,而且事件沒有被記成「已處理」
+    let (status, _) = send_event(
+        &s.app,
+        json!({"id": "evt_bad", "type": "invoice.payment_failed", "created": 1,
+               "data": {"object": {"id": "in_1", "amount_due": 1, "currency": "twd"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM stripe_events WHERE id = 'evt_bad'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded, 0);
+}
+
+#[sqlx::test]
+async fn failure_notice_needs_a_valid_signature(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    let body = payment_failed_event("evt_unsigned", "cus_123", 1, None).to_string();
+    let (status, _) = webhook_raw(&s.app, body.as_bytes(), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = webhook_raw(&s.app, body.as_bytes(), Some("t=1,v1=00")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(deliver(&s.pool).await.is_empty());
 }

@@ -81,6 +81,19 @@ describe('describeDetail', () => {
       ),
     ).toBe('選擇方案:企業版')
     expect(actionLabel('billing.plan_changed')).toBe('方案變更')
+    expect(
+      describeDetail(
+        entry({ action: 'billing.payment_failed', detail: { attempt: 2, final: false } }),
+        tz,
+      ),
+    ).toBe('第 2 次嘗試失敗,Stripe 會再試')
+    expect(
+      describeDetail(
+        entry({ action: 'billing.payment_failed', detail: { attempt: 4, final: true } }),
+        tz,
+      ),
+    ).toBe('第 4 次嘗試失敗,不會再重試')
+    expect(actionLabel('billing.payment_failed')).toBe('訂閱扣款失敗')
   })
 
   it('改期顯示店家時區的前後時間', () => {
@@ -114,6 +127,7 @@ describe('describeDetail', () => {
       'service.updated',
       'booking.rescheduled',
       'billing.plan_changed',
+      'billing.payment_failed',
       'billing.checkout_started',
       'member.role_changed',
       'booking.created',

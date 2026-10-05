@@ -15,6 +15,7 @@ use crate::{
     audit::{self, Actor},
     billing::{self, Parsed, Stripe},
     error::AppError,
+    mail,
     tenancy::{Role, TenantCtx},
 };
 
@@ -246,8 +247,12 @@ async fn webhook(
             tracing::error!(error = %e, "無法解析 Stripe 事件");
             AppError::BadRequest("事件格式不正確".into())
         })?;
-    let Parsed::Subscription(ev) = parsed else {
-        return Ok(Json(json!({ "received": true, "result": "ignored" })));
+    let ev = match parsed {
+        Parsed::Subscription(ev) => ev,
+        Parsed::PaymentFailed(f) => return payment_failed(&state, f).await,
+        Parsed::Ignored => {
+            return Ok(Json(json!({ "received": true, "result": "ignored" })));
+        }
     };
 
     // 付費中卻對不到方案 = 設定錯誤(price id 沒設定)。回 500 讓 Stripe 稍後重送,而不是默默吞掉
@@ -275,5 +280,36 @@ async fn webhook(
     .fetch_one(&state.db)
     .await?;
     tracing::info!(event = %ev.event_id, kind = %ev.kind, %result, "Stripe 事件已處理");
+    Ok(Json(json!({ "received": true, "result": result })))
+}
+
+/// 扣款失敗:通知該店所有店主(信件與稽核由資料庫函式寫入;不改方案,方案跟著訂閱事件走)
+async fn payment_failed(
+    state: &AppState,
+    f: billing::PaymentFailure,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let link = mail::plan_link_template(&state.public_base_url);
+    let (subject, body) = mail::payment_failed(
+        &billing::format_amount(f.amount_due, &f.currency),
+        f.attempt,
+        f.next_attempt.is_some(),
+        &link,
+    );
+    let result: String =
+        sqlx::query_scalar("SELECT billing_payment_failed($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(&f.event_id)
+            .bind(&f.kind)
+            .bind(&f.customer)
+            .bind(&f.invoice)
+            .bind(f.attempt)
+            .bind(f.next_attempt)
+            .bind(&subject)
+            .bind(&body)
+            .fetch_one(&state.db)
+            .await?;
+    if result == "applied" {
+        metrics::counter!("payment_failed_notified_total").increment(1);
+    }
+    tracing::info!(event = %f.event_id, %result, "Stripe 扣款失敗事件已處理");
     Ok(Json(json!({ "received": true, "result": result })))
 }
