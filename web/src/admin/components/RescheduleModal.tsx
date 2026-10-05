@@ -1,4 +1,3 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { ApiError } from '../../api/client'
 import type { SlotSource } from '../../api/queries'
@@ -6,8 +5,8 @@ import { SlotPicker } from '../../components/SlotPicker'
 import { Notice } from '../../components/States'
 import type { TimeOption } from '../../lib/slots'
 import { formatDateTime } from '../../lib/time'
-import { getBookingAvailability, rescheduleBooking } from '../api'
-import { bookingsKey } from '../queries'
+import { getBookingAvailability } from '../api'
+import { useRescheduleBooking } from '../queries'
 import { useShop } from '../ShopContext'
 import type { AdminBooking } from '../types'
 import { Modal } from './Modal'
@@ -31,7 +30,6 @@ export function RescheduleModal({
 
 function RescheduleForm({ booking, onClose }: { booking: AdminBooking; onClose: () => void }) {
   const { slug, shop } = useShop()
-  const queryClient = useQueryClient()
   const [choice, setChoice] = useState<TimeOption | null>(null)
   const tz = shop.timezone
 
@@ -41,15 +39,7 @@ function RescheduleForm({ booking, onClose }: { booking: AdminBooking; onClose: 
     fetch: (from, to) => getBookingAvailability(slug, booking.id, from, to),
   }
 
-  const mutation = useMutation({
-    mutationFn: () => rescheduleBooking(slug, booking.id, choice!.start),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bookingsKey(slug) })
-      queryClient.invalidateQueries({ queryKey: ['availability'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'plan', slug] })
-      onClose()
-    },
-  })
+  const mutation = useRescheduleBooking(slug)
 
   const error = mutation.error
   const message = error instanceof ApiError ? error.message : error ? '改期失敗,請再試一次。' : null
@@ -74,7 +64,9 @@ function RescheduleForm({ booking, onClose }: { booking: AdminBooking; onClose: 
           type="button"
           className="btn btn-primary"
           disabled={!choice || mutation.isPending}
-          onClick={() => mutation.mutate()}
+          onClick={() =>
+            mutation.mutate({ id: booking.id, start: choice!.start }, { onSuccess: onClose })
+          }
         >
           {mutation.isPending
             ? '改期中…'

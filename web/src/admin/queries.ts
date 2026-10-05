@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { listBookings, listMembers } from './api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { listBookings, listMembers, rescheduleBooking } from './api'
 import type { AdminBooking, BookingQuery } from './types'
 
 export const bookingsKey = (slug: string) => ['admin', 'bookings', slug] as const
@@ -40,3 +40,16 @@ export const useMembers = (slug: string) =>
     queryFn: () => listMembers(slug),
     staleTime: 30_000,
   })
+
+/** 員工替顧客改期(改期視窗與拖曳改期共用):成功後預約、可預約時段、用量都要重抓 */
+export function useRescheduleBooking(slug: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { id: string; start: string }) => rescheduleBooking(slug, v.id, v.start),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bookingsKey(slug) })
+      queryClient.invalidateQueries({ queryKey: ['availability'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'plan', slug] })
+    },
+  })
+}

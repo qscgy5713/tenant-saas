@@ -4,6 +4,8 @@ import {
   groupByLocalDay,
   hourWindow,
   layoutDay,
+  startAtUnit,
+  unitFromTop,
   minutesWithin,
   monthStart,
   monthWeeks,
@@ -196,5 +198,35 @@ describe('groupByLocalDay', () => {
     const map = groupByLocalDay(utc, TZ)
     expect([...map.keys()].sort()).toEqual(['2026-10-05', '2026-10-06'])
     expect(map.get('2026-10-05')!.map((x) => x.id)).toEqual(['early', 'late'])
+  })
+})
+
+describe('unitFromTop / startAtUnit:拖曳放開的位置 → 時間', () => {
+  // 欄高 480px、40 格(10 小時 × 4)→ 每格 12px
+  it('吸附到最近的一格;夾在 [0, 最後一格]', () => {
+    expect(unitFromTop(0, 480, 40)).toBe(0)
+    expect(unitFromTop(5, 480, 40)).toBe(0) // 不到半格 → 往下一格以前的那格
+    expect(unitFromTop(7, 480, 40)).toBe(1) // 過半格 → 進位
+    expect(unitFromTop(240, 480, 40)).toBe(20)
+    expect(unitFromTop(-300, 480, 40)).toBe(0)
+    expect(unitFromTop(9999, 480, 40)).toBe(39)
+  })
+
+  it('欄高或格數為 0(尚未排版)不會算出 NaN', () => {
+    expect(unitFromTop(100, 0, 40)).toBe(0)
+    expect(unitFromTop(100, 480, 0)).toBe(0)
+  })
+
+  it('格數 → 店家當地時間的 UTC 瞬間', () => {
+    // 從 9 點起算第 28 格 = 16:00(台北,UTC+8)
+    expect(startAtUnit('2026-10-05', 9, 28, 'Asia/Taipei')).toBe('2026-10-05T08:00:00.000Z')
+    expect(startAtUnit('2026-10-05', 9, 0, 'Asia/Taipei')).toBe('2026-10-05T01:00:00.000Z')
+    expect(startAtUnit('2026-10-05', 9, 1, 'Asia/Taipei')).toBe('2026-10-05T01:15:00.000Z')
+    // 視窗被撐到凌晨時,最後一格仍在同一天
+    expect(startAtUnit('2026-10-05', 0, 95, 'Asia/Taipei')).toBe('2026-10-05T15:45:00.000Z')
+  })
+
+  it('用的是店家時區,不是瀏覽器時區', () => {
+    expect(startAtUnit('2026-10-05', 9, 0, 'America/New_York')).toBe('2026-10-05T13:00:00.000Z')
   })
 })

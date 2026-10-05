@@ -7,6 +7,7 @@ import { addDays, dayRange, formatDayLong, todayYmd } from '../../lib/time'
 import { BookingRow } from '../components/BookingRow'
 import { NewBookingModal } from '../components/NewBookingModal'
 import { MonthCalendar } from '../components/MonthCalendar'
+import { MoveConfirm, type Move } from '../components/MoveConfirm'
 import { WeekCalendar } from '../components/WeekCalendar'
 import { Modal } from '../components/Modal'
 import { addMonths, monthWeeks, weekDays } from '../../lib/calendar'
@@ -46,6 +47,7 @@ export function BookingsPage() {
   const [creating, setCreating] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [pickedId, setPickedId] = useState<string | null>(null)
+  const [move, setMove] = useState<Move | null>(null)
   // 「現在」在這個頁面停留期間固定,避免查詢條件每次渲染都變、一直重新請求
   const [now] = useState(() => new Date())
 
@@ -200,6 +202,9 @@ export function BookingsPage() {
               tz={tz}
               bookings={grid.data.items}
               onPick={(b) => setPickedId(b.id)}
+              // 與詳情裡「改期」按鈕的條件相同:已確認、還沒開始
+              movable={(b) => b.status === 'confirmed' && new Date(b.starts_at) > new Date()}
+              onMove={(booking, start) => setMove({ booking, start })}
             />
           )}
           {grid.data && view === 'month' && (
@@ -253,6 +258,12 @@ export function BookingsPage() {
         <Notice tone="info">只顯示前 {LIMIT} 筆,請用日期或服務人員縮小範圍。</Notice>
       )}
 
+      <MoveConfirm
+        key={move ? `${move.booking.id}@${move.start}` : 'none'}
+        move={move}
+        onClose={() => setMove(null)}
+        onDone={setFlash}
+      />
       <NewBookingModal
         open={creating}
         onClose={() => setCreating(false)}

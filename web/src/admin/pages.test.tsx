@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { freezeNow } from '../test/freeze'
 import { renderApp } from '../test/render'
 import { API, error, server, standardSlots, taipei } from '../test/server'
@@ -416,13 +416,198 @@ describe('週日曆', () => {
     expect(within(cal).queryByText(/取消客/)).not.toBeInTheDocument()
 
     // 16:00 相對於 9 點起點 = 28 格;1 小時 = 4 格。不能有行內 style(正式環境 CSP 會擋)
-    expect(mon).toHaveClass('cal-top-28', 'cal-len-4', 'cal-lane-0-of-1')
+    expect(mon.parentElement).toHaveClass('cal-top-28', 'cal-len-4', 'cal-lane-0-of-1')
     expect(cal.querySelectorAll('[style]')).toHaveLength(0)
 
     await user.click(mon)
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('週一客')).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: '改期' })).toBeInTheDocument()
+  })
+
+  describe('拖曳改期', () => {
+    // jsdom 沒有排版:欄位 10 小時 × 每小時 48px = 480px(預設顯示 9–19 點),區塊的上緣依 class 的格數(每格 12px)
+    beforeEach(() => {
+      vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: Element,
+      ) {
+        const top = this.classList.contains('cal-col')
+          ? 0
+          : Number(/cal-top-(\d+)/.exec(this.className)?.[1] ?? 0) * 12
+        const height = this.classList.contains('cal-col') ? 480 : 48
+        return {
+          top,
+          height,
+          bottom: top + height,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: top,
+        } as DOMRect
+      })
+    })
+    afterEach(() => vi.restoreAllMocks())
+
+    // jsdom 沒有 DragEvent,事件會退化成一般 Event、沒有 clientY → 自己補上
+    function drag(el: Element, type: 'dragStart' | 'dragOver' | 'drop', clientY: number) {
+      const data = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
+      const event = createEvent[type](el, { dataTransfer: data })
+      Object.defineProperty(event, 'clientY', { value: clientY })
+      fireEvent(el, event)
+      return { event, data }
+    }
+
+    const columns = (cal: HTMLElement) => cal.querySelectorAll<HTMLElement>('.cal-col')
+
+    async function setup(over: Partial<AdminBooking> = {}) {
+      mockBookings([
+        booking({
+          starts_at: taipei('2026-10-05', '16:00'),
+          ends_at: taipei('2026-10-05', '17:00'),
+          ...over,
+        }),
+      ])
+      renderApp('/admin/demo-salon/bookings?view=week&date=2026-10-07')
+      const cal = await screen.findByRole('region', { name: '週日曆' })
+      const item = (await within(cal).findByRole('button', { name: /王小明/ })).parentElement!
+      return { cal, item }
+    }
+
+    it('拖到另一天的別個時間 → 先確認 → 以放開位置(吸附 15 分鐘、扣掉抓取點)送出改期', async () => {
+      const { cal, item } = await setup()
+      const s = spy<{ start?: string }>()
+      server.use(
+        http.post(`${API}/t/demo-salon/bookings/b1/reschedule`, async ({ request }) => {
+          await s.record(request)
+          return HttpResponse.json({ id: 'b1', starts_at: '', ends_at: '' })
+        }),
+      )
+      const user = userEvent.setup()
+      expect(item).toHaveAttribute('draggable', 'true')
+
+      // 區塊上緣在 336px(16:00),抓在往下 24px 處;放到週二欄的 14:00(240px)+ 抓取點 + 5px 誤差
+      const start = drag(item, 'dragStart', 336 + 24)
+      // Firefox 沒有 setData 就不會開始拖曳;沒有 preventDefault 的 dragover 則不允許放開
+      expect(start.data.setData).toHaveBeenCalled()
+      const tuesday = columns(cal)[1]
+      const over = drag(tuesday, 'dragOver', 240 + 24 + 5)
+      expect(over.event.defaultPrevented).toBe(true)
+      expect(tuesday).toHaveClass('cal-col-over')
+      drag(tuesday, 'drop', 240 + 24 + 5)
+
+      const dialog = await screen.findByRole('dialog')
+      expect(s.calls).toHaveLength(0) // 還沒確認,不能送出
+      expect(within(dialog).getByText(/通知信給顧客/)).toBeInTheDocument()
+      expect(within(dialog).getByText(/14:00/)).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: '確定改期' }))
+
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ start: taipei('2026-10-06', '14:00') })
+      expect(await screen.findByText('已改期,並寄出通知信給顧客。')).toBeInTheDocument()
+      expect(tuesday).not.toHaveClass('cal-col-over')
+    })
+
+    it('不是我們發起的拖曳(例如從桌面拖檔案進來)→ 不接受放開', async () => {
+      const { cal } = await setup()
+      const over = drag(columns(cal)[1], 'dragOver', 100)
+      expect(over.event.defaultPrevented).toBe(false)
+      drag(columns(cal)[1], 'drop', 100)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('放回原位不會跳出確認;確認視窗按取消不送出', async () => {
+      const { cal, item } = await setup()
+      let posted = 0
+      server.use(
+        http.post(
+          `${API}/t/demo-salon/bookings/b1/reschedule`,
+          () => ((posted += 1), HttpResponse.json({})),
+        ),
+      )
+      const user = userEvent.setup()
+
+      drag(item, 'dragStart', 336 + 10)
+      drag(columns(cal)[0], 'drop', 336 + 10) // 週一原本的位置
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+      drag(item, 'dragStart', 336)
+      drag(columns(cal)[2], 'drop', 336)
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(posted).toBe(0)
+    })
+
+    it('拖出視窗會夾在第一格 / 最後一格(不會變成負的或隔天)', async () => {
+      const { cal, item } = await setup()
+      const user = userEvent.setup()
+      const starts: (string | undefined)[] = []
+      server.use(
+        http.post(`${API}/t/demo-salon/bookings/b1/reschedule`, async ({ request }) => {
+          starts.push(((await request.json()) as { start?: string }).start)
+          return HttpResponse.json({})
+        }),
+      )
+      for (const [y, expected] of [
+        [-500, taipei('2026-10-06', '09:00')],
+        [9999, taipei('2026-10-06', '18:45')],
+      ] as const) {
+        drag(item, 'dragStart', 336)
+        drag(columns(cal)[1], 'drop', y + 336)
+        const dialog = await screen.findByRole('dialog')
+        await user.click(within(dialog).getByRole('button', { name: '確定改期' }))
+        await waitFor(() => expect(starts.at(-1)).toBe(expected))
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      }
+    })
+
+    it('後端拒絕(例如員工沒空)→ 原因顯示在確認視窗裡,不關閉', async () => {
+      const { cal, item } = await setup()
+      server.use(
+        http.post(`${API}/t/demo-salon/bookings/b1/reschedule`, () =>
+          error(409, '這個時段已被預約'),
+        ),
+      )
+      const user = userEvent.setup()
+      drag(item, 'dragStart', 336)
+      drag(columns(cal)[1], 'drop', 240)
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: '確定改期' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('這個時段已被預約')
+      expect(dialog).toHaveAttribute('open')
+    })
+
+    it('只有「已確認且還沒開始」的預約能拖;待確認 / 已過去的不行', async () => {
+      mockBookings([
+        booking({
+          id: 'ok',
+          customer_name: '可拖客',
+          starts_at: taipei('2026-10-05', '16:00'),
+          ends_at: taipei('2026-10-05', '17:00'),
+        }),
+        booking({
+          id: 'pend',
+          customer_name: '待確認客',
+          status: 'pending',
+          starts_at: taipei('2026-10-06', '16:00'),
+          ends_at: taipei('2026-10-06', '17:00'),
+        }),
+        booking({
+          id: 'past',
+          customer_name: '過去客',
+          starts_at: taipei('2026-10-05', '09:00'),
+          ends_at: taipei('2026-10-05', '10:00'),
+        }),
+      ])
+      renderApp('/admin/demo-salon/bookings?view=week&date=2026-10-07')
+      const cal = await screen.findByRole('region', { name: '週日曆' })
+      const draggable = async (name: RegExp) =>
+        (await within(cal).findByRole('button', { name })).parentElement!.getAttribute('draggable')
+      expect(await draggable(/可拖客/)).toBe('true')
+      expect(await draggable(/待確認客/)).toBe('false')
+      expect(await draggable(/過去客/)).toBe('false')
+    })
   })
 
   it('一週超過一頁(100 筆)也會抓完,並用上一週 / 下一週切換', async () => {

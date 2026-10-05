@@ -1,4 +1,4 @@
-import { addDays, toLocalInputs, ymdInTz } from './time'
+import { addDays, toLocalInputs, ymdInTz, zonedToUtc } from './time'
 
 /** 日曆一格 = 15 分鐘;一天 96 格。位置與長度都用「格數」表示,畫面用 class(cal-top-N / cal-len-N),不用行內 style(CSP) */
 export const UNIT_MINUTES = 15
@@ -149,4 +149,21 @@ export function groupByLocalDay<T extends Span>(items: T[], tz: string): Map<str
   }
   for (const list of map.values()) list.sort((a, b) => a.starts_at.localeCompare(b.starts_at))
   return map
+}
+
+/**
+ * 拖曳放開的位置 → 最近的一格(15 分鐘)。
+ * `topPx`:區塊上緣距離欄位頂端的像素;夾在 [0, totalUnits - 1],不會拖出視窗。
+ */
+export function unitFromTop(topPx: number, columnHeightPx: number, totalUnits: number): number {
+  if (columnHeightPx <= 0 || totalUnits <= 0) return 0
+  const unit = Math.round((topPx / columnHeightPx) * totalUnits)
+  return Math.min(totalUnits - 1, Math.max(0, unit))
+}
+
+/** 店家當地 `ymd` 當天、第 `unit` 格(從 `startHour` 點算起)的 UTC 瞬間,ISO 字串 */
+export function startAtUnit(ymd: string, startHour: number, unit: number, tz: string): string {
+  const minutes = startHour * 60 + unit * UNIT_MINUTES
+  const hhmm = `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+  return zonedToUtc(ymd, hhmm, tz).toISOString()
 }
