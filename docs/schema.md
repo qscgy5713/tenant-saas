@@ -93,7 +93,7 @@ CREATE POLICY tenants_select ON tenants FOR SELECT USING (
 - `tenant_id_by_slug(slug) -> uuid`:公開預約頁依子網域取得租戶 id(M4.5 實作)
 - `accept_invitation(token_hash) -> uuid`(M5 實作,使用者取自上下文):被邀請者點連結時還不是成員,沒有租戶上下文,由函式驗證 token、檢查期限並建立 membership
 
-已知限制:`users` 沒有 RLS,`tenant_app` 若遭 SQL injection 可讀到所有使用者的 Email 與密碼雜湊。緩解方式是應用程式只用參數化查詢,並在 M2 評估是否把 `users` 的查詢也包進 `SECURITY DEFINER` 函式(例如 `find_user_for_login(email)`),避免 `tenant_app` 直接擁有整張表的 SELECT。
+已知限制:`users` 沒有 RLS,`tenant_app` 若遭 SQL injection 可列出所有使用者的 Email 與名稱。**讀不到密碼雜湊**:`tenant_app` 只被授予 `users(id, email, name, created_at)` 的欄位層級 SELECT(`tests/tenancy.rs` 驗證)。登入用的 `tenant_runtime` 才有整張表,但它碰不到任何租戶資料表。評估過改用 `SECURITY DEFINER` 函式包裝 `users` 查詢,結論是欄位層級權限已足夠,不再做。
 
 ## 租戶表
 

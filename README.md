@@ -11,7 +11,7 @@
 - [deployment.md](docs/deployment.md):**部署指南**(資料庫角色、步驟、環境變數、監控、上線前檢查表)
 
 ## 狀態
-M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁與店家後台(`web/`);已串接 Stripe 訂閱(結帳 / 客戶入口 / webhook),但只對 `stripe-mock` 與本機簽章測試驗證過,尚未用真實 Stripe 帳號驗證。**未設定 Stripe 時方案只能由營運人員改資料庫。 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。
+M1–M9 全部完成(骨架、認證、多租戶隔離、服務與排程設定、邀請與成員管理、預約核心、Email 確認與背景寄信、方案與限額、稽核日誌與可觀測性、Docker 與部署)。**有顧客預約頁與店家後台(`web/`,登入用 HttpOnly cookie);已串接 Stripe 訂閱(結帳 / 客戶入口 / webhook),但只對 `stripe-mock` 與本機簽章測試驗證過,尚未用真實 Stripe 帳號驗證。**未設定 Stripe 時方案只能由營運人員改資料庫。 上線前請讀 [docs/deployment.md](docs/deployment.md) 的檢查表。
 
 ## 快速開始
 ```

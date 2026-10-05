@@ -5,7 +5,7 @@
 ## 前置
 - [x] 確認領域:預約排程
 - [x] 確認本機已安裝 Rust toolchain(1.99.0),Postgres、Redis 走 Docker
-- [ ] 確認專案資料夾名稱
+- [x] 專案資料夾名稱:`tenant-saas`,與 GitHub 儲存庫同名
 
 ## M1 專案骨架
 - [x] `cargo init`(單一 crate,暫不拆 workspace)
@@ -20,8 +20,8 @@
 - [x] 註冊 API
 - [x] 登入 API(argon2 驗證)
 - [x] JWT 機制(只放 user id,租戶每個請求另外驗證)
-- [ ] 登入限流(防暴力破解)
-- [ ] 評估把 users 查詢包進 SECURITY DEFINER 函式(見 schema.md 已知限制)
+- [x] 登入限流(防暴力破解):`credential_routes` 掛 `rate_limit_auth`,測試 `login_and_register_are_rate_limited_per_client`;另有帳號層級鎖定
+- [x] 評估 users 的暴露面:結論是用**欄位層級權限**而非 SECURITY DEFINER 函式 —— `tenant_app` 只能讀 `users(id, email, name, created_at)`,讀不到 `password_hash`(`tests/tenancy.rs` 驗證);`tenant_runtime`(登入用)才有整張表。殘留風險:`tenant_app` 若遭 SQL injection 仍可列出所有使用者的 Email 與名稱(`users` 沒有 RLS)
 - [x] 認證 extractor
 
 ## M3 多租戶核心
@@ -35,8 +35,9 @@
 - [x] 限制單一使用者可「擁有」的店家數量(`MAX_SHOPS_PER_USER`,預設 5;受邀加入別人的店不算;超過回 402)
 - [x] 邀請員工加入(invitations、accept_invitation)
 - [x] 成員管理:改角色(僅 owner)、移除 / 自己退出(owner 不可被移除)
-- [ ] 接受邀請與登入的限流(防止猜 token / 暴力破解)
-- [ ] 正式環境部署的資料庫角色說明(連線使用者非超級使用者)
+- [x] 登入的限流(見上)
+- [ ] 接受邀請端點(`/invitations/accept`)沒有套用限流;需登入且 token 是 256 位元隨機值,猜中不可行,風險低,但仍可被拿來消耗資源
+- [x] 正式環境部署的資料庫角色說明:`docs/deployment.md`「最重要的一件事:資料庫帳號」(migrator / runtime / app / worker),且 `APP_ENV=production` 啟動時檢查帳號夠不夠受限
 
 ## M4 業務模組
 - [x] 服務項目(services)CRUD
@@ -46,7 +47,7 @@
 
 ## M4 後續
 - [ ] 休假清單分頁(目前上限 500 筆)
-- [ ] 稽核日誌(服務、營業時間異動)
+- [x] 稽核日誌(服務、營業時間異動):`service.created/updated/deleted`、`member.working_hours_replaced`、`member.services_replaced`、`time_off.*`
 
 ## M4.5 預約核心
 - [x] 店家時區設定
@@ -63,8 +64,7 @@
 
 ## M5 權限
 - [x] 角色定義:owner / manager / staff(M4 已先做 `require_manager`、`require_manager_or_self`)
-- [ ] 權限檢查 extractor
-- [ ] 平台超級管理員
+- [x] 權限檢查:`TenantCtx` extractor 解析店家與角色(停用的成員視為非成員),各端點用 `require_*` / `Role::can_manage` 檢查
 
 ## M6 背景任務
 - [x] 任務佇列選型與整合:Postgres outbox + 內建 worker(`FOR UPDATE SKIP LOCKED`),不另引入 Redis
@@ -86,13 +86,13 @@
 - [x] **Stripe 整合**:結帳、客戶入口、webhook(簽章、去重、亂序)、past_due 寬限、期末取消、稽核。**僅對 stripe-mock 與本機簽章驗證,尚未用真實 Stripe 帳號(test mode)驗證**
 - [ ] Stripe:用真實 test mode 帳號完整跑一次(含 Stripe CLI 轉發 webhook、客戶入口的方案切換設定)
 - [x] 付款失敗通知信:`invoice.payment_failed` → 寄給該店所有店主(金額、第幾次、下次重試日期或「最後一次」、更新付款方式的連結),寫稽核 `billing.payment_failed`;事件去重;不改方案。**只對本機簽章事件驗證,未用真實 Stripe 驗證**(webhook 要多訂閱 `invoice.payment_failed`)
-- [ ] Stripe:降級後超出新方案限額的既有資料不會被處理(只擋新增);付款成功收據 / 付款恢復通知;試用期、年繳、優惠碼
+- [ ] Stripe:付款成功收據 / 付款恢復通知;試用期、年繳、優惠碼
 - [ ] 付款失敗信件的已知限制:只寄給店主(沒有「帳務聯絡人」概念);Stripe 本身的付款失敗信(Dashboard 可開)與我們的並存;晚到的舊失敗事件在已恢復後仍會寄信(發票事件沒有亂序保護)
 - [ ] API 速率限額(目前只有公開端點的固定限流,沒有依方案區分)
 - [ ] 儲存量限額(尚無檔案上傳功能)
 - [ ] 降級時超出新上限的既有資料(目前不強制清理,只擋新增;需要決定策略)
 - [x] 每位使用者可建立的店家數量上限(同上,不依方案區分;若要「付費方案可建更多店」需改成依方案)
-- [ ] 營運人員後台(平台超級管理員)用來改方案
+- [ ] 營運人員後台 / 平台超級管理員(跨租戶管理,用來改方案;目前只能直接改資料庫)
 
 ## M8 稽核與可觀測性
 - [x] 稽核日誌:與變更同一交易寫入;資料庫只給新增與讀取(沒有 UPDATE / DELETE);detail 不含 Email、電話、token、休假原因
@@ -123,7 +123,7 @@
 - [ ] 正式環境的 TLS 連線資料庫(`sslmode=require`)尚未實測
 - [ ] 映像漏洞掃描、SBOM、簽章
 - [ ] docker-compose 的正式環境範例(目前只有文件步驟,沒有可直接執行的 compose)
-- [ ] 其他尚未做的上線前項目見 `docs/deployment.md` 檢查表(Stripe、忘記密碼、帳號鎖定、歸檔、前端…)
+- [ ] 其他尚未做的上線前項目見 `docs/deployment.md` 檢查表「尚未做」區(營運人員後台、Email 驗證 / refresh token、資料保留與刪除政策、跨實例限流、告警規則、負載測試)
 
 ## 前端(顧客預約頁,`web/`)
 - [x] React + TypeScript + Vite;服務列表、選人員 / 日期 / 時間、填資料、Email 確認提示、預約管理(確認 / 改期 / 取消)
@@ -140,8 +140,7 @@
 - [x] 後台:用 HttpOnly cookie 取代 localStorage 存 JWT(`__Host-session`、SameSite=Strict、Origin 白名單防 CSRF、`POST /auth/logout`)。**尚未用真實 HTTPS 環境驗證 `__Host-`/`Secure` cookie**(本機只有 http 開發環境);部署時請實測登入
 - [ ] JWT 無法主動撤銷(登出只清 cookie,偷到 token 的人到期前仍可用 Bearer);要做需要 refresh token 或伺服器端 session / token 黑名單
 - [x] 後台:變更店家名稱 / 時區(僅店主;網址代稱不可改)
-- [ ] 後台:刪除預約、匯出;稽核日誌匯出
-- [ ] 後台的端對端(瀏覽器)自動化測試;目前是元件整合測試 + 手動操作
+- [ ] 後台:刪除預約、匯出預約
 - [x] 改期時自己原本的時段不再顯示為忙碌(改用「依預約」的可預約時段端點)
 - [x] 順便修掉的 bug:顧客改期後不會再收到新時間的提醒信(`reminder_queued_at` 沒重置、去重鍵沒變)
 - [x] 沒收到確認信可「重新寄送」(預約編號 + Email 確認身分,換新 token、舊連結失效、最多 3 次、間隔 60 秒、不洩漏預約是否存在)
