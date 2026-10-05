@@ -17,8 +17,8 @@ use crate::{
     booking::PENDING_TTL_HOURS,
     db::begin_worker,
     error::AppError,
-    mail::{BookingMail, Email, Mailer, format_local, reminder},
-    outbox,
+    mail::{BookingMail, Email, Mailer, booking_link, format_local, reminder},
+    outbox, token,
 };
 
 pub const MAX_ATTEMPTS: i32 = 5;
@@ -37,7 +37,11 @@ pub struct TickStats {
 }
 
 /// 各階段獨立:提醒排程或過期整理出錯,不能連帶讓寄信停擺。階段失敗只記錄,不中斷其他階段。
-pub async fn tick(pool: &PgPool, mailer: &Mailer) -> Result<TickStats, AppError> {
+pub async fn tick(
+    pool: &PgPool,
+    mailer: &Mailer,
+    public_base_url: &str,
+) -> Result<TickStats, AppError> {
     fn or_log<T: Default>(stage: &str, result: Result<T, AppError>) -> T {
         result.unwrap_or_else(|err| {
             tracing::error!(stage, error = %err, "worker 階段失敗");
@@ -47,7 +51,10 @@ pub async fn tick(pool: &PgPool, mailer: &Mailer) -> Result<TickStats, AppError>
 
     let mut stats = TickStats {
         expired: or_log("expire_pending", expire_pending(pool).await),
-        reminders: or_log("enqueue_reminders", enqueue_reminders(pool).await),
+        reminders: or_log(
+            "enqueue_reminders",
+            enqueue_reminders(pool, public_base_url).await,
+        ),
         ..Default::default()
     };
     // 寄信失敗代表連資料庫都有問題,這個才往外回報
@@ -98,7 +105,7 @@ struct ReminderRow {
 
 /// 24 小時內開始、且確認時距離開始超過 24 小時的預約,各排一封提醒信。
 /// (確認時就已經不到 24 小時的,剛收過確認信,不再重複提醒。)
-async fn enqueue_reminders(pool: &PgPool) -> Result<u64, AppError> {
+async fn enqueue_reminders(pool: &PgPool, public_base_url: &str) -> Result<u64, AppError> {
     let mut tx = begin_worker(pool).await?;
     let rows = sqlx::query_as::<_, ReminderRow>(
         "SELECT b.id, b.tenant_id, b.starts_at, b.reminder_seq,
@@ -128,13 +135,18 @@ async fn enqueue_reminders(pool: &PgPool) -> Result<u64, AppError> {
             continue;
         };
         let when = format_local(row.starts_at, tz);
-        let email = reminder(&BookingMail {
-            to: &row.customer_email,
-            shop: &row.shop_name,
-            service: &row.service_name,
-            staff: &row.staff_name,
-            when: &when,
-        });
+        // 提醒信專用的管理 token:原始值只在這封信裡,資料庫只存雜湊
+        let raw = token::generate();
+        let email = reminder(
+            &BookingMail {
+                to: &row.customer_email,
+                shop: &row.shop_name,
+                service: &row.service_name,
+                staff: &row.staff_name,
+                when: &when,
+            },
+            &booking_link(public_base_url, &raw),
+        );
         outbox::enqueue(
             &mut tx,
             row.tenant_id,
@@ -144,8 +156,11 @@ async fn enqueue_reminders(pool: &PgPool) -> Result<u64, AppError> {
             Some(&format!("reminder:{}:{}", row.id, row.reminder_seq)),
         )
         .await?;
-        sqlx::query("UPDATE bookings SET reminder_queued_at = now() WHERE id = $1")
-            .bind(row.id)
+        sqlx::query(
+            "UPDATE bookings SET reminder_queued_at = now(), reminder_token_hash = $2 WHERE id = $1",
+        )
+        .bind(row.id)
+        .bind(token::hash(&raw))
             .execute(&mut *tx)
             .await?;
         queued += 1;
@@ -259,12 +274,13 @@ async fn cleanup(pool: &PgPool) -> Result<u64, AppError> {
 pub async fn run(
     pool: PgPool,
     mailer: Mailer,
+    public_base_url: String,
     poll: Duration,
     mut shutdown: watch::Receiver<bool>,
 ) {
     tracing::info!(?poll, "背景 worker 啟動");
     while !*shutdown.borrow() {
-        match tick(&pool, &mailer).await {
+        match tick(&pool, &mailer, &public_base_url).await {
             Ok(stats) if stats != TickStats::default() => {
                 metrics::counter!("emails_sent_total").increment(stats.sent);
                 metrics::counter!("emails_retried_total").increment(stats.retried);

@@ -171,7 +171,7 @@ async fn public_booking_needs_email_confirmation(pool: PgPool) {
 
     // 信已排進 outbox,但寄出前信箱收不到
     assert!(memory.sent().is_empty());
-    let stats = tick(&pool, &mailer).await.unwrap();
+    let stats = tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(stats.sent, 1);
     let mails = memory.sent();
     assert_eq!(mails.len(), 1);
@@ -237,7 +237,7 @@ async fn public_booking_needs_email_confirmation(pool: PgPool) {
         .0,
         StatusCode::OK
     );
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let mails = memory.sent();
     assert_eq!(mails.len(), 2, "驗證信 + 一封確認信");
     assert!(mails[1].subject.contains("已確認"));
@@ -259,7 +259,7 @@ async fn first_confirmation_wins_when_two_people_request_the_same_slot(pool: PgP
         request(&s, start, "second@example.com").await.0,
         StatusCode::CREATED
     );
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let mails = memory.sent();
     let token_of = |email: &str| token_in(&mails.iter().find(|m| m.to == email).unwrap().body);
     let (t1, t2) = (
@@ -306,7 +306,7 @@ async fn confirmation_links_expire_and_pending_does_not_block(pool: PgPool) {
     let start = at(day(3), 10, 0);
 
     request(&s, start, "late@example.com").await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token = token_in(&memory.sent()[0].body);
 
     // 待確認不影響員工代客預約同一時段
@@ -334,7 +334,7 @@ async fn confirmation_links_expire_and_pending_does_not_block(pool: PgPool) {
         .0,
         StatusCode::CONFLICT
     );
-    let stats = tick(&pool, &mailer).await.unwrap();
+    let stats = tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(stats.expired, 1);
     assert_eq!(
         status_of(&pool, "late@example.com").await,
@@ -437,17 +437,21 @@ async fn reminders_are_sent_once_for_the_right_bookings(pool: PgPool) {
             .execute(&pool).await.unwrap();
     }
 
-    let stats = tick(&pool, &mailer).await.unwrap();
+    let stats = tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!((stats.reminders, stats.sent), (1, 1));
     let mails = memory.sent();
     assert!(mails[0].subject.contains("提醒"));
     assert!(
-        !mails[0].body.contains("/bookings/"),
-        "提醒信不含管理連結(資料庫只存雜湊)"
+        mails[0].body.contains("http://app.test/bookings/"),
+        "提醒信要有改期 / 取消連結: {}",
+        mails[0].body
     );
 
     // 再跑一次不會重複提醒
-    assert_eq!(tick(&pool, &mailer).await.unwrap(), TickStats::default());
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test").await.unwrap(),
+        TickStats::default()
+    );
     assert_eq!(memory.sent().len(), 1);
 }
 
@@ -482,7 +486,7 @@ async fn failed_sends_back_off_and_then_succeed(pool: PgPool) {
     let memory = MemoryMailer::failing(2);
     let mailer = Mailer::Memory(memory.clone());
 
-    let stats = tick(&pool, &mailer).await.unwrap();
+    let stats = tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!((stats.sent, stats.retried), (0, 1));
     let (attempts, delay, error): (i32, f64, Option<String>) = sqlx::query_as(
         "SELECT attempts, extract(epoch FROM run_at - now())::float8, last_error FROM email_outbox",
@@ -495,10 +499,19 @@ async fn failed_sends_back_off_and_then_succeed(pool: PgPool) {
     assert!(error.is_some());
 
     // 還沒到時間,不會再試
-    assert_eq!(tick(&pool, &mailer).await.unwrap(), TickStats::default());
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test").await.unwrap(),
+        TickStats::default()
+    );
 
     make_due(&pool).await;
-    assert_eq!(tick(&pool, &mailer).await.unwrap().retried, 1);
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .retried,
+        1
+    );
     let delay: f64 =
         sqlx::query_scalar("SELECT extract(epoch FROM run_at - now())::float8 FROM email_outbox")
             .fetch_one(&pool)
@@ -510,7 +523,10 @@ async fn failed_sends_back_off_and_then_succeed(pool: PgPool) {
     );
 
     make_due(&pool).await;
-    assert_eq!(tick(&pool, &mailer).await.unwrap().sent, 1);
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test").await.unwrap().sent,
+        1
+    );
     assert_eq!(memory.sent().len(), 1);
     let (status, attempts, body): (String, i32, String) =
         sqlx::query_as("SELECT status, attempts, body FROM email_outbox")
@@ -529,7 +545,10 @@ async fn gives_up_after_max_attempts_and_scrubs_the_body(pool: PgPool) {
     let mut failed = 0;
     for _ in 0..worker::MAX_ATTEMPTS {
         make_due(&pool).await;
-        failed += tick(&pool, &mailer).await.unwrap().failed;
+        failed += tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .failed;
     }
     assert_eq!(failed, 1);
     let (status, body, error): (String, String, Option<String>) =
@@ -541,7 +560,7 @@ async fn gives_up_after_max_attempts_and_scrubs_the_body(pool: PgPool) {
     assert!(error.is_some());
     make_due(&pool).await;
     assert_eq!(
-        tick(&pool, &mailer).await.unwrap(),
+        tick(&pool, &mailer, "http://app.test").await.unwrap(),
         TickStats::default(),
         "failed 不會再被撈出來"
     );
@@ -561,7 +580,13 @@ async fn old_finished_mail_is_cleaned_up(pool: PgPool) {
                      VALUES ($1, 'x@example.com', 's', '', $2, now() - $3::interval, now() + interval '1 day')")
             .bind(s.tenant_id).bind(status).bind(age).execute(&pool).await.unwrap();
     }
-    assert_eq!(tick(&pool, &mailer).await.unwrap().cleaned, 2);
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .cleaned,
+        2
+    );
     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM email_outbox")
         .fetch_one(&pool)
         .await
@@ -584,7 +609,7 @@ async fn invitation_emails_are_queued_and_scrubbed_after_sending(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     let token = inv["token"].as_str().unwrap();
 
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let mails = memory.sent();
     assert_eq!(mails.len(), 1);
     assert_eq!(mails[0].to, "new@example.com");
@@ -700,6 +725,7 @@ async fn background_loop_delivers_mail_and_stops_on_shutdown(pool: PgPool) {
     let handle = tokio::spawn(worker::run(
         pool.clone(),
         Mailer::Memory(memory.clone()),
+        "http://app.test".to_string(),
         StdDuration::from_millis(50),
         rx,
     ));
@@ -730,7 +756,7 @@ async fn confirmation_rechecks_that_the_slot_is_still_bookable(pool: PgPool) {
     let start = at(d, 10, 0);
 
     request(&s, start, "c@example.com").await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token = token_in(&memory.sent()[0].body);
 
     // 顧客還沒確認時,員工新增了涵蓋該時段的休假
@@ -774,7 +800,7 @@ async fn one_failing_stage_does_not_stop_mail_delivery(pool: PgPool) {
         .await
         .unwrap();
 
-    let stats = tick(&pool, &mailer).await.unwrap();
+    let stats = tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(stats.reminders, 0);
     assert_eq!(stats.sent, 1, "提醒出錯,但待寄的信照樣寄出");
     assert_eq!(memory.sent().len(), 1);
@@ -835,7 +861,13 @@ async fn rescheduled_bookings_get_a_fresh_reminder(pool: PgPool) {
         .execute(&pool).await.unwrap();
 
     // 第一次提醒
-    assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
 
     // 顧客改到三天後(合法的營業時段)
     let new_start = at(day(3), 10, 0);
@@ -857,7 +889,13 @@ async fn rescheduled_bookings_get_a_fresh_reminder(pool: PgPool) {
 
     // 模擬時間來到新預約的前一天:應該收到針對新時間的第二封提醒
     sqlx::query("UPDATE bookings SET starts_at = now() + interval '20 hours', ends_at = now() + interval '21 hours'").execute(&pool).await.unwrap();
-    assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
     let subjects: Vec<String> = memory.sent().iter().map(|m| m.subject.clone()).collect();
     assert_eq!(
         subjects.iter().filter(|x| x.contains("提醒")).count(),
@@ -885,7 +923,13 @@ async fn reminders_are_sent_again_after_moving_back_to_the_original_time(pool: P
     for target in [b, a, b] {
         // 模擬「提醒窗口到了」:把開始時間拉到 20 小時後,寄出提醒,再改期到 target
         sqlx::query("UPDATE bookings SET starts_at = now() + interval '20 hours', ends_at = now() + interval '21 hours'").execute(&pool).await.unwrap();
-        assert_eq!(tick(&pool, &mailer).await.unwrap().reminders, 1);
+        assert_eq!(
+            tick(&pool, &mailer, "http://app.test")
+                .await
+                .unwrap()
+                .reminders,
+            1
+        );
         let (status, body) = call(
             &s.app,
             Method::POST,
@@ -933,14 +977,14 @@ async fn resending_issues_a_new_link_and_voids_the_old_one(pool: PgPool) {
     let (mailer, memory) = mailer();
     let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
     let id = created["id"].as_str().unwrap();
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let old = token_in(&memory.sent()[0].body);
 
     age_last_send(&pool).await;
     // Email 大小寫與前後空白不影響
     let (status, _) = resend(&s, id, "  C@Example.com ").await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let mails = memory.sent();
     assert_eq!(mails.len(), 2);
     assert_eq!(mails[1].to, "c@example.com");
@@ -987,14 +1031,14 @@ async fn resend_never_reveals_whether_a_booking_exists(pool: PgPool) {
     let (mailer, memory) = mailer();
     let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
     let id = created["id"].as_str().unwrap();
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     age_last_send(&pool).await;
 
     let real = resend(&s, id, "someone-else@example.com").await; // 編號對、Email 不符
     let unknown = resend(&s, &uuid::Uuid::new_v4().to_string(), "c@example.com").await; // 編號不存在
     assert_eq!(real.0, StatusCode::ACCEPTED);
     assert_eq!(real, unknown, "回應必須一模一樣");
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(
         memory.sent().len(),
         1,
@@ -1022,14 +1066,14 @@ async fn resend_is_limited_in_count_and_frequency(pool: PgPool) {
 
     // 剛寄出不到一分鐘:不重寄
     resend(&s, id, "c@example.com").await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(memory.sent().len(), 1, "只有最初的那封");
 
     for _ in 0..6 {
         age_last_send(&pool).await;
         resend(&s, id, "c@example.com").await;
     }
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     assert_eq!(memory.sent().len(), 1 + 3, "最多重寄 3 次");
 }
 
@@ -1039,7 +1083,7 @@ async fn resend_only_works_while_the_request_is_still_pending(pool: PgPool) {
     let (mailer, memory) = mailer();
     let (_, created) = request(&s, at(day(3), 10, 0), "c@example.com").await;
     let id = created["id"].as_str().unwrap();
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token = token_in(&memory.sent()[0].body);
     age_last_send(&pool).await;
 
@@ -1065,7 +1109,7 @@ async fn resend_only_works_while_the_request_is_still_pending(pool: PgPool) {
     .await;
     resend(&s, id, "c@example.com").await;
 
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let verifications = memory
         .sent()
         .iter()
@@ -1128,7 +1172,7 @@ async fn confirming_after_the_staff_was_deactivated_fails_cleanly(pool: PgPool) 
         .await
         .unwrap();
     assert_eq!(assigned, b);
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token = token_in(&memory.sent()[0].body);
 
     // 待確認的預約不擋停用
@@ -1159,4 +1203,187 @@ async fn confirming_after_the_staff_was_deactivated_fails_cleanly(pool: PgPool) 
     .await
     .unwrap();
     assert_eq!(reason, "no_longer_bookable");
+}
+
+/// 提醒信的連結:專用的 token(資料庫只存雜湊),能管理預約,而且不影響確認信的連結
+#[sqlx::test]
+async fn reminder_link_manages_the_booking_without_replacing_the_confirmation_link(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let confirmation = confirmed_booking_in_20h(&s, &pool).await;
+
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
+    let reminder_token = token_in(&memory.sent()[0].body);
+    assert_eq!(reminder_token.len(), 64);
+    assert_ne!(reminder_token, confirmation, "兩封信的連結是不同的祕密");
+
+    // 資料庫只存雜湊:原始 token 不在任何欄位,寄出後信件內容也被清掉
+    let (hash, body): (String, String) = sqlx::query_as(
+        "SELECT b.reminder_token_hash, (SELECT body FROM email_outbox LIMIT 1) FROM bookings b",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(hash, tenant_saas::token::hash(&reminder_token));
+    assert_ne!(hash, reminder_token);
+    assert_eq!(body, "");
+
+    // 提醒信的連結看得到預約,也查得到改期要用的可預約時段
+    let get = |t: String| {
+        let app = s.app.clone();
+        async move {
+            call(
+                &app,
+                Method::GET,
+                &format!("/public/bookings/{t}"),
+                None,
+                None,
+            )
+            .await
+        }
+    };
+    let (status, view) = get(reminder_token.clone()).await;
+    assert_eq!(
+        (status, view["status"].as_str()),
+        (StatusCode::OK, Some("confirmed"))
+    );
+    let (status, _) = call(
+        &s.app,
+        Method::GET,
+        &format!(
+            "/public/bookings/{reminder_token}/availability?from={}",
+            day(2)
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // 確認信的連結沒有因此失效;亂猜的仍是 404
+    assert_eq!(get(confirmation.clone()).await.0, StatusCode::OK);
+    assert_eq!(get("0".repeat(64)).await.0, StatusCode::NOT_FOUND);
+
+    // 對已確認的預約再按「確認」(例如重複點擊)是無害的成功,不會改變任何東西
+    let (status, view) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{reminder_token}/confirm"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, view["status"].as_str()),
+        (StatusCode::OK, Some("confirmed"))
+    );
+
+    // 用提醒信的連結取消 → 成功,兩個連結看到的是同一筆已取消的預約
+    let (status, view) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{reminder_token}/cancel"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, view["status"].as_str()),
+        (StatusCode::OK, Some("cancelled"))
+    );
+    assert_eq!(get(confirmation).await.1["status"], "cancelled");
+}
+
+/// 提醒信的連結能改期;改期後重新提醒時發新的 token,上一封提醒信的連結失效(確認信的連結不受影響)
+#[sqlx::test]
+async fn a_new_reminder_after_rescheduling_replaces_the_old_reminder_link(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let confirmation = confirmed_booking_in_20h(&s, &pool).await;
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
+    let first = token_in(&memory.sent()[0].body);
+
+    // 用第一封提醒信的連結改期
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{first}/reschedule"),
+        Some(json!({"start": at(day(3), 10, 0).to_rfc3339()})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 新時間的前一天:第二封提醒,連結是新的
+    sqlx::query("UPDATE bookings SET starts_at = now() + interval '20 hours', ends_at = now() + interval '21 hours'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
+    let mails = memory.sent();
+    let second = token_in(
+        &mails
+            .iter()
+            .rfind(|m| m.subject.contains("提醒"))
+            .unwrap()
+            .body,
+    );
+    assert_ne!(first, second);
+
+    let get = |t: &str| {
+        let (app, t) = (s.app.clone(), t.to_string());
+        async move {
+            call(
+                &app,
+                Method::GET,
+                &format!("/public/bookings/{t}"),
+                None,
+                None,
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(get(&second).await, StatusCode::OK);
+    assert_eq!(
+        get(&first).await,
+        StatusCode::NOT_FOUND,
+        "上一封提醒信的連結失效"
+    );
+    assert_eq!(
+        get(&confirmation).await,
+        StatusCode::OK,
+        "確認信的連結一直有效"
+    );
+}
+
+/// 20 小時後開始、3 天前確認的預約(符合提醒條件)。回傳確認信連結的原始 token
+async fn confirmed_booking_in_20h(s: &Shop, pool: &PgPool) -> String {
+    let customer: Uuid = sqlx::query_scalar("INSERT INTO customers (tenant_id, name, email) VALUES ($1, '顧客', 'c@example.com') RETURNING id")
+        .bind(s.tenant_id).fetch_one(pool).await.unwrap();
+    let confirmation = "k".repeat(64);
+    let start = Utc::now() + Duration::hours(20);
+    sqlx::query("INSERT INTO bookings (tenant_id, staff_user_id, service_id, customer_id, starts_at, ends_at, status, manage_token_hash, confirmed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'confirmed', $7, now() - interval '3 days')")
+        .bind(s.tenant_id).bind(s.owner_id).bind(s.service_id.parse::<Uuid>().unwrap()).bind(customer)
+        .bind(start).bind(start + Duration::hours(1)).bind(tenant_saas::token::hash(&confirmation))
+        .execute(pool).await.unwrap();
+    confirmation
 }

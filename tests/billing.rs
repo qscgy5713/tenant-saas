@@ -841,7 +841,9 @@ fn payment_failed_event(id: &str, customer: &str, attempt: i64, next: Option<i64
 /// 寄出佇列裡的信,回傳 (收件者, 標題, 內容)
 async fn deliver(pool: &PgPool) -> Vec<(String, String, String)> {
     let memory = MemoryMailer::new();
-    tick(pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    tick(pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     memory
         .sent()
         .into_iter()

@@ -257,7 +257,8 @@ async fn booking_availability(
     let to = validated_range(q.from, q.to)?;
     let (mut tx, _, tz) = open_by_token(&state, &raw).await?;
     let row: Option<(Uuid, Uuid, Uuid, BookingStatus)> = sqlx::query_as(
-        "SELECT id, service_id, staff_user_id, status FROM bookings WHERE manage_token_hash = $1",
+        "SELECT id, service_id, staff_user_id, status FROM bookings
+         WHERE manage_token_hash = $1 OR reminder_token_hash = $1",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -448,7 +449,7 @@ async fn load_by_token(tx: &mut Tx, raw: &str) -> Result<PublicBooking, AppError
          JOIN services s ON s.id = b.service_id
          JOIN users u ON u.id = b.staff_user_id
          JOIN customers c ON c.id = b.customer_id
-         WHERE b.manage_token_hash = $1",
+         WHERE b.manage_token_hash = $1 OR b.reminder_token_hash = $1",
     )
     .bind(token::hash(raw))
     .fetch_optional(&mut **tx)
@@ -492,7 +493,7 @@ async fn booking_ics(
          JOIN tenants t ON t.id = b.tenant_id
          JOIN services s ON s.id = b.service_id
          JOIN users u ON u.id = b.staff_user_id
-         WHERE b.manage_token_hash = $1",
+         WHERE b.manage_token_hash = $1 OR b.reminder_token_hash = $1",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -555,7 +556,7 @@ async fn confirm_booking(
         staff_id,
     } = sqlx::query_as::<_, PendingRow>(
         "SELECT id, status, starts_at, created_at, service_id, staff_user_id AS staff_id
-         FROM bookings WHERE manage_token_hash = $1 FOR UPDATE",
+         FROM bookings WHERE manage_token_hash = $1 OR reminder_token_hash = $1 FOR UPDATE",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -720,7 +721,7 @@ async fn lock_changeable(
 ) -> Result<(Uuid, Uuid, Uuid, BookingStatus), AppError> {
     let row: Option<(Uuid, Uuid, Uuid, BookingStatus, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, service_id, staff_user_id, status, starts_at FROM bookings
-         WHERE manage_token_hash = $1 FOR UPDATE",
+         WHERE manage_token_hash = $1 OR reminder_token_hash = $1 FOR UPDATE",
     )
     .bind(token::hash(raw))
     .fetch_optional(&mut **tx)

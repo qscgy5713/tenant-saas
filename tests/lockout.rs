@@ -37,7 +37,9 @@ async fn setup(pool: PgPool) -> axum::Router {
 
 async fn deliver(pool: &PgPool) -> Vec<(String, String)> {
     let memory = MemoryMailer::new();
-    tick(pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    tick(pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     memory
         .sent()
         .into_iter()
@@ -176,7 +178,9 @@ async fn owner_is_notified_once_when_locked(pool: PgPool) {
 
     fail_times(&app, "a@example.com", 8).await;
     let memory = MemoryMailer::new();
-    tick(&pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    tick(&pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     let sent = memory.sent();
     assert_eq!(sent.len(), 1, "只在觸發鎖定那一次寄一封: {sent:?}");
     assert_eq!(sent[0].to, "a@example.com");
@@ -207,7 +211,9 @@ async fn password_reset_unlocks(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     let memory = MemoryMailer::new();
-    tick(&pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    tick(&pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     let body = memory.sent().remove(0).body;
     let token: String = body
         .split("/admin/reset#token=")

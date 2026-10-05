@@ -132,7 +132,9 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
     assert_eq!(status, StatusCode::CREATED, "{req}");
 
     let memory = MemoryMailer::new();
-    let stats = tick(&pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    let stats = tick(&pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     assert!(stats.sent >= 1, "worker 要能在受限帳號下寄信: {stats:?}");
     let mail = memory
         .sent()

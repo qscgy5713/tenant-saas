@@ -552,9 +552,13 @@ async fn confirming_counts_toward_the_limit(pool: PgPool) {
 
     // 用 worker 寄信取出 token
     let memory = tenant_saas::mail::MemoryMailer::new();
-    tenant_saas::worker::tick(&pool, &tenant_saas::mail::Mailer::Memory(memory.clone()))
-        .await
-        .unwrap();
+    tenant_saas::worker::tick(
+        &pool,
+        &tenant_saas::mail::Mailer::Memory(memory.clone()),
+        "http://app.test",
+    )
+    .await
+    .unwrap();
     let token_of = |email: &str| -> String {
         let mail = memory.sent().into_iter().find(|m| m.to == email).unwrap();
         mail.body

@@ -55,7 +55,9 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> (StatusCode, 
 /// 寄出佇列裡的信,回傳(收件者, 內容)
 async fn deliver(pool: &PgPool) -> Vec<(String, String)> {
     let memory = MemoryMailer::new();
-    tick(pool, &Mailer::Memory(memory.clone())).await.unwrap();
+    tick(pool, &Mailer::Memory(memory.clone()), "http://app.test")
+        .await
+        .unwrap();
     memory.sent().into_iter().map(|m| (m.to, m.body)).collect()
 }
 

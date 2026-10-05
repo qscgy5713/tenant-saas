@@ -109,6 +109,7 @@ async fn serve() -> Result<()> {
         Some(tokio::spawn(worker::run(
             db.clone(),
             mailer,
+            config.public_base_url.clone(),
             Duration::from_secs(config.worker_poll_secs),
             shutdown_rx,
         )))

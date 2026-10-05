@@ -506,7 +506,7 @@ async fn customer_actions_are_audited_with_customer_as_actor(pool: PgPool) {
     let start = at(day(3), 10, 0);
 
     let req = request(&s, start, "c@example.com").await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token = token_in(&memory.sent()[0].body);
     let id = req["id"].as_str().unwrap();
 
@@ -518,7 +518,7 @@ async fn customer_actions_are_audited_with_customer_as_actor(pool: PgPool) {
         None,
     )
     .await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     call(
         &s.app,
         Method::POST,
@@ -603,7 +603,7 @@ async fn system_cancellations_record_the_reason(pool: PgPool) {
     request(&s, start, "second@example.com").await;
     // 第三位:申請後超過有效期,由 worker 整理(confirmation_expired)
     request(&s, start + Duration::hours(4), "stale@example.com").await;
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
     let token_of = |email: &str| {
         token_in(
             &memory
@@ -636,7 +636,7 @@ async fn system_cancellations_record_the_reason(pool: PgPool) {
     assert_eq!(status, StatusCode::CONFLICT);
     sqlx::query("UPDATE bookings SET created_at = now() - interval '25 hours' WHERE customer_id IN (SELECT id FROM customers WHERE email = 'stale@example.com')")
         .execute(&pool).await.unwrap();
-    tick(&pool, &mailer).await.unwrap();
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
 
     let body = logs(
         &s.app,

@@ -255,9 +255,13 @@ async fn metrics_report_the_mail_queue(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    tick(&pool, &Mailer::Memory(MemoryMailer::new()))
-        .await
-        .unwrap();
+    tick(
+        &pool,
+        &Mailer::Memory(MemoryMailer::new()),
+        "http://app.test",
+    )
+    .await
+    .unwrap();
     let body = scrape().await;
     assert_eq!(value(&body, "email_outbox_pending"), 0.0);
     assert_eq!(value(&body, "email_outbox_oldest_due_age_seconds"), 0.0);

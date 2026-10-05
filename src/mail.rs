@@ -175,13 +175,13 @@ pub fn confirmed(m: &BookingMail, link: &str) -> Email {
 }
 
 /// 提醒信不含管理連結:資料庫只存雜湊,原始 token 寄出後就不保留
-pub fn reminder(m: &BookingMail) -> Email {
+pub fn reminder(m: &BookingMail, manage_link: &str) -> Email {
     Email {
         to: m.to.to_string(),
         subject: format!("預約提醒:{}", m.shop),
         body: format!(
             "您好,\n\n提醒您即將到來的預約:\n\n  店家:{}\n  服務:{}\n  人員:{}\n  時間:{}\n\n\
-             如需取消或改期,請使用預約確認信中的連結。\n",
+             如需改期或取消,請使用下列連結(預約開始前都有效):\n\n  {manage_link}\n",
             m.shop, m.service, m.staff, m.when
         ),
     }

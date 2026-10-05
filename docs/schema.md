@@ -292,6 +292,7 @@ CREATE POLICY tenant_isolation ON services
 ## 後續新增(0012–0014)
 | 資料表 / 欄位 | 說明 | 存取 |
 |---|---|---|
+| `bookings.reminder_token_hash` | 提醒信專用的管理 token 的雜湊(與 `manage_token_hash` 並存,任一個都能管理這筆預約);每次排提醒時換新 | worker(排提醒時寫入);公開預約端點以 `manage_token_hash OR reminder_token_hash` 查詢 |
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
 | `memberships.active` | 員工停用(離職):false 時進不了這家店、不出現在可預約名單、不佔方案名額;歷史預約保留。見 decisions「員工停用」 | tenant_app(經 `deactivate` / `reactivate` 端點) |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
