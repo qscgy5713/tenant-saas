@@ -100,7 +100,9 @@ describe('登入表單', () => {
     await user.type(await screen.findByLabelText('Email'), 'a@example.com')
     await user.type(screen.getByLabelText('密碼'), 'wrong')
     await user.click(screen.getByRole('button', { name: '登入' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Email 或密碼錯誤')
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Email 或密碼錯誤。連續輸錯多次帳號會暫時鎖定',
+    )
     expect(getSession()).toBeNull()
   })
 

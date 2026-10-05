@@ -217,6 +217,17 @@ pub fn password_reset(to: &str, link: &str) -> Email {
     }
 }
 
+pub fn account_locked(to: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "您的帳號因多次登入失敗被暫時鎖定".to_string(),
+        body: "您好,\n\n您的帳號連續多次登入失敗,為了安全已暫時鎖定 15 分鐘。\n\n\
+               如果是您本人輸錯,等 15 分鐘後再試即可;也可以使用登入頁的「忘記密碼」立即重設並解鎖。\n\
+               如果不是您本人的操作,建議立刻重設密碼。\n"
+            .to_string(),
+    }
+}
+
 pub fn invitation(to: &str, shop: &str, role: &str, link: &str) -> Email {
     Email {
         to: to.to_string(),

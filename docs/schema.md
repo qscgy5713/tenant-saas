@@ -294,6 +294,7 @@ CREATE POLICY tenant_isolation ON services
 |---|---|---|
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
+| `users.failed_logins` / `last_failed_login_at` / `locked_until` | 帳號鎖定:5 次 / 15 分鐘;鎖定中不再計數、不延長;距上次失敗超過 15 分鐘重算 | **只能經** `login_failed` / `login_succeeded`(SECURITY DEFINER);`tenant_app` 讀不到 |
 | `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |
 | `password_resets` | token 雜湊、1 小時、單次;每帳號每小時最多 3 筆 | **只能經** `request_password_reset` / `reset_password`(SECURITY DEFINER,授權 runtime) |
 | `tenant_billing` | Stripe 客戶 / 訂閱狀態 / 期末 / 已套用事件時間 | **只能經** `billing_state`、`billing_attach_customer`(租戶上下文)、`billing_apply_event`(webhook,runtime) |

@@ -101,15 +101,21 @@ struct LoginRow {
     email: String,
     name: String,
     password_hash: String,
+    locked: bool,
 }
 
+/// 登入。帳號不存在、密碼錯誤、帳號鎖定中,對外一律是同一個 401(不洩漏哪些 Email 已註冊 / 是否被鎖);
+/// 三種情況都會做一次雜湊運算,耗時也相近。
+/// 連續失敗 5 次鎖 15 分鐘(見 migration 0017);鎖定期間連正確密碼都不收。
 async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, AppError> {
     let email = req.email.trim();
     let row = sqlx::query_as::<_, LoginRow>(
-        "SELECT id, email::text AS email, name, password_hash FROM users WHERE email = $1::citext",
+        "SELECT id, email::text AS email, name, password_hash,
+                COALESCE(locked_until > now(), false) AS locked
+         FROM users WHERE email = $1::citext",
     )
     .bind(email)
     .fetch_optional(&state.db)
@@ -119,9 +125,30 @@ async fn login(
         verify_dummy(req.password).await;
         return Err(AppError::Unauthorized);
     };
-    if !verify_password(req.password, row.password_hash).await {
+    let password_ok = verify_password(req.password, row.password_hash).await;
+    if row.locked {
+        metrics::counter!("login_rejected_locked_total").increment(1);
         return Err(AppError::Unauthorized);
     }
+    if !password_ok {
+        let mail = mail::account_locked(&row.email);
+        let newly_locked = sqlx::query_scalar::<_, bool>("SELECT login_failed($1, $2, $3)")
+            .bind(row.id)
+            .bind(&mail.subject)
+            .bind(&mail.body)
+            .fetch_one(&state.db)
+            .await?;
+        if newly_locked {
+            // 日誌只記使用者 ID,不記 Email
+            tracing::warn!(user_id = %row.id, "帳號因連續登入失敗被鎖定");
+            metrics::counter!("account_locked_total").increment(1);
+        }
+        return Err(AppError::Unauthorized);
+    }
+    sqlx::query("SELECT login_succeeded($1)")
+        .bind(row.id)
+        .execute(&state.db)
+        .await?;
 
     let token = state.jwt.issue(row.id)?;
     Ok(Json(AuthResponse {

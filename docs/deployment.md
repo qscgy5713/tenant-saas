@@ -192,7 +192,8 @@ scrape_configs:
 
 - [ ] **Stripe / 計費**:方案目前只能由營運人員直接改資料庫(`UPDATE tenants SET plan_id = …`)
 - [ ] 營運人員後台(跨租戶管理)
-- [ ] 忘記密碼 / 重設密碼、註冊 Email 驗證、refresh token(JWT 目前只有單一短效 token,無法主動撤銷)
+- [x] 帳號鎖定(5 次 / 15 分鐘);告警建議:`account_locked_total` 突然升高代表有人在猜密碼
+- [ ] 註冊 Email 驗證、refresh token(JWT 目前只有單一短效 token,無法主動撤銷)
 - [ ] 帳號層級的登入鎖定(目前只有 IP 層級限流;分散式攻擊要另外處理)
 - [ ] 稽核日誌歸檔、資料保留與刪除政策(個資法 / GDPR 的刪除請求流程)
 - [ ] 全域(跨實例)限流

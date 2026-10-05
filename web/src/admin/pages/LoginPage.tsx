@@ -43,7 +43,7 @@ export function LoginPage() {
   const message =
     err instanceof ApiError
       ? err.status === 401
-        ? 'Email 或密碼錯誤'
+        ? 'Email 或密碼錯誤。連續輸錯多次帳號會暫時鎖定,可改用下方的「忘記密碼」。'
         : err.message
       : err
         ? '登入失敗,請再試一次。'
