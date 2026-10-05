@@ -2,6 +2,11 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-05(取消預約通知信)
+- 員工 / 顧客取消 → 通知對方(見 decisions);`MailCtx` 多帶店家代稱、員工 Email、顧客名稱
+- 突變驗證 9 個,8 個抓到;存活的 1 個是等價突變(標完成 / 未到必須已開始,與「還沒開始才寄」互斥)
+- 下一步:員工停用、建店數量上限、清理過期待辦
+
 ## 2026-10-05(HttpOnly cookie 登入)
 - 後端:`session.rs`(cookie 組裝 / 解析、Origin 白名單)、`AuthUser` 支援 cookie + Bearer、`POST /auth/logout`;前端:session 不存 token、啟動 `/auth/me`、守衛等 loading
 - **發現並承認一個驗證漏洞**:本機一直用 `tsc --noEmit -p .`,但根 `tsconfig.json` 是 project references(`files: []`),這個指令**什麼都不檢查**,所以先前回報的「tsc 乾淨」在本機沒有驗證力(CI 用 `tsc -b` 是綠的,已推送的程式碼沒問題)。之後一律用 `npm run typecheck`

@@ -1242,3 +1242,196 @@ async fn staff_reschedule_into_a_full_month_reports_the_limit(pool: PgPool) {
         "員工看得到方案資訊: {body}"
     );
 }
+
+// ---------- 取消預約的通知 ----------
+
+/// 取消通知信:(dedupe_key, 收件者, 標題, 內容),依 dedupe_key 排序
+async fn cancel_mails(pool: &PgPool) -> Vec<(String, String, String, String)> {
+    sqlx::query_as(
+        "SELECT dedupe_key, to_email, subject, body FROM email_outbox
+         WHERE dedupe_key LIKE 'cancelled:%' ORDER BY dedupe_key",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn cancel_as(s: &Shop, token: &str, id: &str) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::PATCH,
+        &format!("/t/shop-a/bookings/{id}"),
+        Some(json!({"status": "cancelled"})),
+        Some(token),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn shop_cancelling_a_confirmed_booking_tells_the_customer(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, created) = book(&s.app, &s, None, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    assert_eq!(cancel_as(&s, &s.owner, id).await.0, StatusCode::OK);
+
+    let mails = cancel_mails(&pool).await;
+    // 負責的員工就是取消的人自己 → 只通知顧客
+    assert_eq!(mails.len(), 1, "{mails:?}");
+    let (key, to, subject, body) = &mails[0];
+    assert_eq!(key, &format!("cancelled:{id}:customer"));
+    assert_eq!(to, "c@example.com");
+    assert!(
+        subject.contains("預約已取消") && subject.contains("店 shop-a"),
+        "{subject}"
+    );
+    assert!(body.contains("剪髮") && body.contains("10:00"), "{body}");
+    // 給顧客一條路:回店家的預約頁重新預約
+    assert!(body.contains("http://app.test/s/shop-a"), "{body}");
+
+    // 已經是終態,再取消是 409,不會再寄一封
+    assert_eq!(cancel_as(&s, &s.owner, id).await.0, StatusCode::CONFLICT);
+    assert_eq!(cancel_mails(&pool).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn manager_cancelling_someone_elses_booking_also_tells_that_staff(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (b_token, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    assert_eq!(cancel_as(&s, &s.owner, id).await.0, StatusCode::OK);
+    let mails = cancel_mails(&pool).await;
+    let recipients: Vec<_> = mails.iter().map(|m| (m.0.as_str(), m.1.as_str())).collect();
+    assert_eq!(
+        recipients,
+        [
+            (format!("cancelled:{id}:customer").as_str(), "c@example.com"),
+            (format!("cancelled:{id}:staff").as_str(), "b@example.com"),
+        ]
+    );
+    assert!(mails[1].3.contains("店家管理者取消"), "{}", mails[1].3);
+    assert!(
+        mails[1].3.contains("顧客"),
+        "要讓員工知道是哪位顧客: {}",
+        mails[1].3
+    );
+
+    // 員工取消自己負責的預約 → 只通知顧客
+    let (_, again) = book(&s.app, &s, Some(b_id), at(day(4), 10, 0), "d@example.com").await;
+    let id2 = again["id"].as_str().unwrap();
+    assert_eq!(cancel_as(&s, &b_token, id2).await.0, StatusCode::OK);
+    let keys: Vec<_> = cancel_mails(&pool).await.into_iter().map(|m| m.0).collect();
+    assert!(keys.contains(&format!("cancelled:{id2}:customer")));
+    assert!(
+        !keys.contains(&format!("cancelled:{id2}:staff")),
+        "{keys:?}"
+    );
+}
+
+#[sqlx::test]
+async fn customer_cancelling_tells_the_staff_not_themselves(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let (id, token) = (
+        created["id"].as_str().unwrap(),
+        created["manage_token"].as_str().unwrap(),
+    );
+
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/cancel"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mails = cancel_mails(&pool).await;
+    assert_eq!(mails.len(), 1, "顧客自己按的取消,不必再寄給他: {mails:?}");
+    let (key, to, _, body) = &mails[0];
+    assert_eq!(key, &format!("cancelled:{id}:staff"));
+    assert_eq!(to, "b@example.com");
+    assert!(body.contains("顧客自己取消"), "{body}");
+    assert!(body.contains("剪髮") && body.contains("10:00"), "{body}");
+
+    // 重複取消(重送、連點)→ 409,不會重複通知
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/cancel"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(cancel_mails(&pool).await.len(), 1);
+}
+
+#[sqlx::test]
+async fn unverified_and_past_bookings_send_no_cancel_mail(pool: PgPool) {
+    let s = shop(&pool).await;
+
+    // 待確認(Email 還沒驗證):店家取消 / 顧客取消都不寄,員工也沒看過它
+    let (_, pending) = book(&s.app, &s, None, at(day(3), 10, 0), "p@example.com").await;
+    let pid = pending["id"].as_str().unwrap();
+    sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = $1::uuid")
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cancel_as(&s, &s.owner, pid).await.0, StatusCode::OK);
+
+    let (_, pending2) = book(&s.app, &s, None, at(day(4), 10, 0), "q@example.com").await;
+    let (qid, qtoken) = (
+        pending2["id"].as_str().unwrap(),
+        pending2["manage_token"].as_str().unwrap(),
+    );
+    sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = $1::uuid")
+        .bind(qid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{qtoken}/cancel"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 已經過去的預約被取消:通知「取消」只會造成困惑
+    let (_, past) = book(&s.app, &s, None, at(day(5), 10, 0), "r@example.com").await;
+    let rid = past["id"].as_str().unwrap();
+    sqlx::query("UPDATE bookings SET starts_at = now() - interval '2 hours', ends_at = now() - interval '1 hour' WHERE id = $1::uuid")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cancel_as(&s, &s.owner, rid).await.0, StatusCode::OK);
+
+    // 標記完成 / 未到不是取消
+    let (_, done) = book(&s.app, &s, None, at(day(6), 10, 0), "s@example.com").await;
+    let did = done["id"].as_str().unwrap();
+    sqlx::query("UPDATE bookings SET starts_at = now() - interval '2 hours', ends_at = now() - interval '1 hour' WHERE id = $1::uuid")
+        .bind(did)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = call(
+        &s.app,
+        Method::PATCH,
+        &format!("/t/shop-a/bookings/{did}"),
+        Some(json!({"status": "completed"})),
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(cancel_mails(&pool).await.is_empty());
+}

@@ -200,6 +200,53 @@ pub fn rescheduled(m: &BookingMail, old_when: &str) -> Email {
     }
 }
 
+/// 店家的公開預約頁(通知信裡的「重新預約」)
+pub fn shop_page_link(base_url: &str, slug: &str) -> String {
+    format!("{}/s/{slug}", base(base_url))
+}
+
+/// 店家取消了預約,通知顧客。只用於「已確認」的預約:待確認的 Email 還沒驗證過,不該寄信給它
+pub fn cancelled_by_shop(m: &BookingMail, shop_link: &str) -> Email {
+    Email {
+        to: m.to.to_string(),
+        subject: format!("預約已取消:{}", m.shop),
+        body: format!(
+            "您好,\n\n很抱歉,店家取消了下列預約:\n\n  店家:{}\n  服務:{}\n  人員:{}\n  時間:{}\n\n\
+             這個時段已釋出。如需重新預約,請至:\n\n  {shop_link}\n",
+            m.shop, m.service, m.staff, m.when
+        ),
+    }
+}
+
+/// 誰取消的(員工通知信的措辭不同)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CancelledBy {
+    Customer,
+    Manager,
+}
+
+/// 預約被取消,通知負責的員工(`to` 是員工的 Email,不是顧客)
+pub fn cancelled_for_staff(
+    m: &BookingMail,
+    to: &str,
+    customer_name: &str,
+    by: CancelledBy,
+) -> Email {
+    let who = match by {
+        CancelledBy::Customer => "顧客自己取消了",
+        CancelledBy::Manager => "店家管理者取消了",
+    };
+    Email {
+        to: to.to_string(),
+        subject: format!("預約已取消:{}", m.shop),
+        body: format!(
+            "您好,\n\n{who}一筆由您負責的預約:\n\n  店家:{}\n  顧客:{customer_name}\n  服務:{}\n  時間:{}\n\n\
+             這個時段已釋出,不需要再準備。\n",
+            m.shop, m.service, m.when
+        ),
+    }
+}
+
 pub fn password_reset_link(base_url: &str, token: &str) -> String {
     // token 放在 # 之後:不會送到任何伺服器、不進存取紀錄與 Referer
     format!("{}/admin/reset#token={token}", base(base_url))

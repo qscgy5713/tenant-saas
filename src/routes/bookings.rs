@@ -268,6 +268,38 @@ async fn update(
         detail,
     )
     .await?;
+
+    // 取消「已確認、還沒開始」的預約要通知:顧客一定要知道;若是管理者取消別人負責的預約,也通知那位員工。
+    // 待確認的不寄(顧客的 Email 還沒驗證過);已經開始 / 過去的預約不寄(通知「取消」只會造成困惑)
+    if req.status == Some(BookingStatus::Cancelled)
+        && status == BookingStatus::Confirmed
+        && starts_at > Utc::now()
+    {
+        let m = booking::mail_ctx(&mut tx, id).await?;
+        let link = mail::shop_page_link(&state.public_base_url, &m.slug);
+        outbox::enqueue(
+            &mut tx,
+            ctx.tenant_id,
+            &mail::cancelled_by_shop(&m.view(), &link),
+            Some(&format!("cancelled:{id}:customer")),
+        )
+        .await?;
+        if staff_id != ctx.user_id {
+            let email = mail::cancelled_for_staff(
+                &m.view(),
+                &m.staff_email,
+                &m.customer_name,
+                mail::CancelledBy::Manager,
+            );
+            outbox::enqueue(
+                &mut tx,
+                ctx.tenant_id,
+                &email,
+                Some(&format!("cancelled:{id}:staff")),
+            )
+            .await?;
+        }
+    }
     tx.commit().await?;
     Ok(Json(updated))
 }

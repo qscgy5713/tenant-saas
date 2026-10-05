@@ -411,10 +411,16 @@ pub async fn reschedule_booking(
 
 /// 寄信需要的預約資訊
 pub struct MailCtx {
+    /// 顧客的 Email
     pub to: String,
     pub shop: String,
+    /// 店家網址代稱(通知信裡放「重新預約」的連結)
+    pub slug: String,
     pub service: String,
     pub staff: String,
+    /// 負責這筆預約的員工的 Email(通知員工用)
+    pub staff_email: String,
+    pub customer_name: String,
     pub when: String,
 }
 
@@ -431,7 +437,10 @@ impl MailCtx {
 }
 
 pub async fn mail_ctx(tx: &mut Tx, booking_id: Uuid) -> Result<MailCtx, AppError> {
-    let (to, shop, timezone, service, staff, starts_at): (
+    let (to, shop, slug, timezone, service, staff, staff_email, customer_name, starts_at): (
+        String,
+        String,
+        String,
         String,
         String,
         String,
@@ -439,7 +448,8 @@ pub async fn mail_ctx(tx: &mut Tx, booking_id: Uuid) -> Result<MailCtx, AppError
         String,
         DateTime<Utc>,
     ) = sqlx::query_as(
-        "SELECT c.email::text, t.name, t.timezone, s.name, u.name, b.starts_at
+        "SELECT c.email::text, t.name, t.slug, t.timezone, s.name, u.name, u.email::text, c.name,
+                b.starts_at
          FROM bookings b
          JOIN customers c ON c.id = b.customer_id
          JOIN tenants t ON t.id = b.tenant_id
@@ -456,8 +466,11 @@ pub async fn mail_ctx(tx: &mut Tx, booking_id: Uuid) -> Result<MailCtx, AppError
     Ok(MailCtx {
         to,
         shop,
+        slug,
         service,
         staff,
+        staff_email,
+        customer_name,
         when: crate::mail::format_local(starts_at, tz),
     })
 }

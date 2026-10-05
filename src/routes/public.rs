@@ -656,6 +656,23 @@ async fn cancel_booking(
         json!({ "from": from, "to": BookingStatus::Cancelled }),
     )
     .await?;
+    // 已確認的預約被顧客取消 → 通知負責的員工(待確認的從沒進過員工的行事曆,不用通知)
+    if from == BookingStatus::Confirmed {
+        let m = booking::mail_ctx(&mut tx, id).await?;
+        let email = mail::cancelled_for_staff(
+            &m.view(),
+            &m.staff_email,
+            &m.customer_name,
+            mail::CancelledBy::Customer,
+        );
+        outbox::enqueue(
+            &mut tx,
+            tenant_id,
+            &email,
+            Some(&format!("cancelled:{id}:staff")),
+        )
+        .await?;
+    }
     let view = load_by_token(&mut tx, &raw).await?;
     tx.commit().await?;
     Ok(Json(view))
