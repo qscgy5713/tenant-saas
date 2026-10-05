@@ -8,14 +8,17 @@
 --   ALTER ROLE tenant_runtime WITH LOGIN PASSWORD '...';
 -- 因為 migration 不該保管密碼,而且開發環境用超級使用者連線,不需要這個帳號可登入。
 
--- 角色是整個叢集共用的,平行建立資料庫時 DDL 會互相踩到,所以序列化
+-- 角色是整個叢集共用的,平行建立資料庫時 DDL 會互相踩到。
+-- 注意:advisory lock 只在同一個資料庫內有效,擋不住「各自建資料庫」的並行;真正防撞的是下面吞掉重複錯誤。
 SELECT pg_advisory_xact_lock(7002001);
 
+-- 角色是整個叢集共用的:平行建立(例如 CI 同時跑很多測試、各自建資料庫)時「先檢查再建立」
+-- 會被別人搶先而撞到唯一鍵,所以直接建立並吞掉重複錯誤(與 0002 / 0007 相同)。
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tenant_runtime') THEN
-        CREATE ROLE tenant_runtime NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
-    END IF;
+    CREATE ROLE tenant_runtime NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+EXCEPTION WHEN duplicate_object OR unique_violation THEN
+    NULL;
 END $$;
 
 -- INHERIT FALSE:不自動繼承權限;SET TRUE:允許 SET ROLE。需要 PostgreSQL 16 以上

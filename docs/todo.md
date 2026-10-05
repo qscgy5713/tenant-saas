@@ -117,7 +117,7 @@
 - [x] 帳號鎖定:同一帳號連續登入失敗 5 次鎖 15 分鐘(補上依 IP 限流擋不住的分散式猜密碼);鎖定中連正確密碼都不收、對外與「密碼錯誤」「帳號不存在」同一個 401;鎖定時寄信通知;重設密碼解鎖;日誌與指標(`account_locked_total`、`login_rejected_locked_total`)
 - [ ] 帳號鎖定沒寫進 `audit_logs`(稽核表屬於店家,帳號層級事件沒有 tenant_id);目前只有日誌 + 指標 + 通知信。另外,攻擊者可故意輸錯把別人鎖 15 分鐘(無法登入但不影響忘記密碼),尚無 CAPTCHA
 - [x] production 沒設 `SMTP_URL` 就拒絕啟動(Log 模式會把一次性連結印進日誌)
-- [ ] **CI 尚未在 GitHub 上實際執行過**(只驗證了 YAML 語法,並在本機以相同順序重現每個步驟)
+- [x] CI 已在 GitHub 上實際執行(每次 push 觸發,5 個工作:test / restricted-role / web / 2 個 docker)。曾抓到一次間歇性失敗:`CREATE ROLE tenant_runtime` 在平行測試間的競態(見 decisions)
 - [ ] 正式環境的 TLS 連線資料庫(`sslmode=require`)尚未實測
 - [ ] 映像漏洞掃描、SBOM、簽章
 - [ ] docker-compose 的正式環境範例(目前只有文件步驟,沒有可直接執行的 compose)
