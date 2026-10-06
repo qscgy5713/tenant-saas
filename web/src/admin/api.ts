@@ -122,6 +122,7 @@ export const listServices = (slug: string) =>
 export interface ServiceInput {
   name: string
   duration_minutes: number
+  buffer_minutes: number
   price_cents: number
 }
 

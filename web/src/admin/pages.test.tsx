@@ -40,6 +40,7 @@ const service = (over: Partial<AdminService> = {}): AdminService => ({
   id: 's1',
   name: '剪髮',
   duration_minutes: 60,
+  buffer_minutes: 0,
   price_cents: 50000,
   active: true,
   ...over,
@@ -805,7 +806,70 @@ describe('服務', () => {
     await user.type(price, '800')
     await user.click(within(dialog).getByRole('button', { name: '儲存' }))
     await waitFor(() => expect(s.calls).toHaveLength(1))
-    expect(s.calls[0].body).toEqual({ name: '護髮', duration_minutes: 45, price_cents: 80000 })
+    expect(s.calls[0].body).toEqual({
+      name: '護髮',
+      duration_minutes: 45,
+      buffer_minutes: 0, // 沒填就是 0(沒有整理時間)
+      price_cents: 80000,
+    })
+  })
+
+  it('整理時間:預設 0、範圍 0–120、送出的值、清單上標示;顧客看不到的設定有說明', async () => {
+    mockShopMe('owner')
+    listing([service({ id: 's2', name: '染髮', buffer_minutes: 20 }), service()])
+    const s = spy<Record<string, unknown>>()
+    server.use(
+      http.post(`${API}/t/demo-salon/services`, async ({ request }) => {
+        await s.record(request)
+        return HttpResponse.json(service(), { status: 201 })
+      }),
+    )
+    renderApp('/admin/demo-salon/services')
+    const user = userEvent.setup()
+    // 清單:有整理時間的才標示,0 不顯示
+    expect(await screen.findByText(/整理 20 分鐘/)).toBeInTheDocument()
+    expect(screen.getAllByText(/整理 \d+ 分鐘/)).toHaveLength(1)
+
+    await user.click((await screen.findAllByRole('button', { name: /新增服務/ }))[0])
+    const dialog = await screen.findByRole('dialog')
+    const buffer = within(dialog).getByLabelText('整理時間(分鐘)')
+    expect(buffer).toHaveValue(0)
+    expect(within(dialog).getByText(/顧客看不到/)).toBeInTheDocument()
+    await user.type(within(dialog).getByLabelText('服務名稱'), '護髮')
+
+    for (const bad of ['-5', '121', '1.5']) {
+      await user.clear(buffer)
+      await user.type(buffer, bad)
+      await user.click(within(dialog).getByRole('button', { name: '儲存' }))
+      expect(within(dialog).getByText(/0–120/), bad).toBeInTheDocument()
+    }
+    expect(s.calls).toHaveLength(0)
+
+    await user.clear(buffer)
+    await user.type(buffer, '15')
+    await user.click(within(dialog).getByRole('button', { name: '儲存' }))
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toMatchObject({ buffer_minutes: 15 })
+  })
+
+  it('編輯既有服務:帶入目前的整理時間', async () => {
+    mockShopMe('owner')
+    listing([service({ buffer_minutes: 25 })])
+    const s = spy<Record<string, unknown>>()
+    server.use(
+      http.patch(`${API}/t/demo-salon/services/s1`, async ({ request }) => {
+        await s.record(request)
+        return HttpResponse.json(service())
+      }),
+    )
+    renderApp('/admin/demo-salon/services')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '編輯' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('整理時間(分鐘)')).toHaveValue(25)
+    await user.click(within(dialog).getByRole('button', { name: '儲存' }))
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toMatchObject({ buffer_minutes: 25 })
   })
 
   it('超過方案上限(402)→ 在對話框顯示後端訊息', async () => {

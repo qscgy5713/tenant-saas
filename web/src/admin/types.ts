@@ -36,6 +36,8 @@ export interface AdminService {
   id: string
   name: string
   duration_minutes: number
+  /** 服務結束後員工的整理時間(分鐘),顧客看不到 */
+  buffer_minutes: number
   price_cents: number
   active: boolean
 }

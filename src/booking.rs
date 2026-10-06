@@ -11,7 +11,7 @@ use sqlx::{Acquire, FromRow};
 use uuid::Uuid;
 
 use crate::{
-    availability::{SLOT_STEP_MINUTES, Slot, StaffSchedule, compute_slots},
+    availability::{SLOT_STEP_MINUTES, Slot, StaffSchedule, Timing, compute_slots},
     db::{PG_EXCLUSION_VIOLATION, Tx, pg_code},
     error::AppError,
     token,
@@ -42,18 +42,29 @@ pub struct ServiceInfo {
     pub id: Uuid,
     pub name: String,
     pub duration_minutes: i32,
+    /// 服務結束後,員工多久不能接下一筆(顧客看不到)
+    pub buffer_minutes: i32,
 }
 
 impl ServiceInfo {
     pub fn duration(&self) -> Duration {
         Duration::minutes(i64::from(self.duration_minutes))
     }
+
+    pub fn buffer(&self) -> Duration {
+        Duration::minutes(i64::from(self.buffer_minutes))
+    }
+
+    /// 預約結束後員工仍被占住到什麼時候(寫進 `bookings.blocked_until`,是預約當下的快照)
+    pub fn blocked_until(&self, start: DateTime<Utc>) -> DateTime<Utc> {
+        start + self.duration() + self.buffer()
+    }
 }
 
 /// 啟用中的服務;不存在或已停用都回 400(對公開端點而言兩者沒有差別)
 pub async fn active_service(tx: &mut Tx, service_id: Uuid) -> Result<ServiceInfo, AppError> {
     sqlx::query_as::<_, ServiceInfo>(
-        "SELECT id, name, duration_minutes FROM services WHERE id = $1 AND active",
+        "SELECT id, name, duration_minutes, buffer_minutes FROM services WHERE id = $1 AND active",
     )
     .bind(service_id)
     .fetch_optional(&mut **tx)
@@ -100,14 +111,21 @@ async fn load_schedules(
     .fetch_all(&mut **tx)
     .await?;
 
-    let busy: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+    let time_off: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT user_id, starts_at, ends_at FROM time_off
-           WHERE user_id = ANY($1) AND ends_at > $2 AND starts_at < $3
-         UNION ALL
-         SELECT staff_user_id, starts_at, ends_at FROM bookings
+           WHERE user_id = ANY($1) AND ends_at > $2 AND starts_at < $3",
+    )
+    .bind(&staff)
+    .bind(range_start)
+    .bind(range_end)
+    .fetch_all(&mut **tx)
+    .await?;
+    // 既有預約占住到 blocked_until(結束 + 當時的整理時間),不是 ends_at
+    let booked: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT staff_user_id, starts_at, blocked_until FROM bookings
            WHERE staff_user_id = ANY($1)
              AND status IN ('confirmed', 'completed', 'no_show')
-             AND ends_at > $2 AND starts_at < $3
+             AND blocked_until > $2 AND starts_at < $3
              AND ($4::uuid IS NULL OR id <> $4)",
     )
     .bind(&staff)
@@ -126,7 +144,12 @@ async fn load_schedules(
                 .filter(|(u, ..)| *u == user_id)
                 .map(|&(_, wd, s, e)| (wd as u32, s, e))
                 .collect(),
-            busy: busy
+            time_off: time_off
+                .iter()
+                .filter(|(u, ..)| *u == user_id)
+                .map(|&(_, s, e)| (s, e))
+                .collect(),
+            booked: booked
                 .iter()
                 .filter(|(u, ..)| *u == user_id)
                 .map(|&(_, s, e)| (s, e))
@@ -162,8 +185,11 @@ pub async fn availability(
         tz,
         from,
         to,
-        service.duration(),
-        Duration::minutes(SLOT_STEP_MINUTES),
+        Timing {
+            duration: service.duration(),
+            buffer: service.buffer(),
+            step: Duration::minutes(SLOT_STEP_MINUTES),
+        },
         Utc::now(),
         &schedules,
     ))
@@ -325,8 +351,8 @@ pub async fn create_booking(
         let result = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO bookings
                (tenant_id, staff_user_id, service_id, customer_id, starts_at, ends_at,
-                manage_token_hash, status, confirmed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                manage_token_hash, status, confirmed_at, blocked_until)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
         )
         .bind(tenant_id)
         .bind(staff_id)
@@ -337,6 +363,7 @@ pub async fn create_booking(
         .bind(token::hash(&raw_token))
         .bind(initial)
         .bind((initial == BookingStatus::Confirmed).then(Utc::now))
+        .bind(service.blocked_until(input.start))
         .fetch_one(&mut *sp)
         .await;
         match result {
@@ -393,12 +420,13 @@ pub async fn reschedule_booking(
     let new_end = new_start + service.duration();
     // reminder_queued_at 清掉、reminder_seq 加一:提醒是針對「那個時間」寄的,改期之後要針對新時間重新排
     let result = sqlx::query(
-        "UPDATE bookings SET starts_at = $2, ends_at = $3, reminder_queued_at = NULL,
-                reminder_seq = reminder_seq + 1 WHERE id = $1",
+        "UPDATE bookings SET starts_at = $2, ends_at = $3, blocked_until = $4,
+                reminder_queued_at = NULL, reminder_seq = reminder_seq + 1 WHERE id = $1",
     )
     .bind(booking_id)
     .bind(new_start)
     .bind(new_end)
+    .bind(service.blocked_until(new_start))
     .execute(&mut **tx)
     .await;
     match result {

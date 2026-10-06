@@ -107,6 +107,7 @@ export function ServicesPage() {
               </div>
               <div className="row-sub">
                 {formatDuration(s.duration_minutes)} · {formatPrice(s.price_cents)}
+                {s.buffer_minutes > 0 && ` · 整理 ${s.buffer_minutes} 分鐘`}
               </div>
             </div>
             {canManage && (
@@ -204,8 +205,14 @@ function ServiceForm({
   const { slug } = useShop()
   const [name, setName] = useState(service?.name ?? '')
   const [minutes, setMinutes] = useState(String(service?.duration_minutes ?? 60))
+  const [buffer, setBuffer] = useState(String(service?.buffer_minutes ?? 0))
   const [price, setPrice] = useState(String((service?.price_cents ?? 0) / 100))
-  const [errors, setErrors] = useState<{ name?: string; minutes?: string; price?: string }>({})
+  const [errors, setErrors] = useState<{
+    name?: string
+    minutes?: string
+    buffer?: string
+    price?: string
+  }>({})
 
   const mutation = useMutation({
     mutationFn: (input: ServiceInput) =>
@@ -216,6 +223,7 @@ function ServiceForm({
   const submit = (e: FormEvent) => {
     e.preventDefault()
     const duration = Number(minutes)
+    const bufferMinutes = Number(buffer)
     const yuan = Number(price)
     const found = {
       name: validateName(name, '服務名稱') ?? undefined,
@@ -223,14 +231,23 @@ function ServiceForm({
         Number.isInteger(duration) && duration >= 5 && duration <= 1440
           ? undefined
           : '時長需為 5–1440 分鐘的整數',
+      buffer:
+        Number.isInteger(bufferMinutes) && bufferMinutes >= 0 && bufferMinutes <= 120
+          ? undefined
+          : '整理時間需為 0–120 分鐘的整數',
       price:
         Number.isInteger(yuan) && yuan >= 0 && yuan <= 100_000
           ? undefined
           : '價格需為 0–100,000 的整數(元)',
     }
     setErrors(found)
-    if (found.name || found.minutes || found.price) return
-    mutation.mutate({ name: name.trim(), duration_minutes: duration, price_cents: yuan * 100 })
+    if (found.name || found.minutes || found.buffer || found.price) return
+    mutation.mutate({
+      name: name.trim(),
+      duration_minutes: duration,
+      buffer_minutes: bufferMinutes,
+      price_cents: yuan * 100,
+    })
   }
 
   return (
@@ -265,6 +282,27 @@ function ServiceForm({
             />
           </label>
           {errors.minutes && <p className="field-msg">{errors.minutes}</p>}
+        </div>
+        <div className={`field ${errors.buffer ? 'field-error' : ''}`}>
+          <label>
+            <span className="field-label">整理時間(分鐘)</span>
+            <input
+              name="buffer"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              max={120}
+              step={5}
+              value={buffer}
+              onChange={(e) => setBuffer(e.target.value)}
+              aria-invalid={!!errors.buffer}
+            />
+          </label>
+          {errors.buffer ? (
+            <p className="field-msg">{errors.buffer}</p>
+          ) : (
+            <p className="field-hint">結束後員工的整理時間;顧客看不到,只會讓下一位最早晚一點</p>
+          )}
         </div>
         <div className={`field ${errors.price ? 'field-error' : ''}`}>
           <label>

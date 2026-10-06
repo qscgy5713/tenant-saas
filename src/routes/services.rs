@@ -33,6 +33,8 @@ struct Service {
     id: Uuid,
     name: String,
     duration_minutes: i32,
+    /// 服務結束後員工的整理時間(分鐘)。顧客看不到,只影響員工的下一筆預約最早何時開始
+    buffer_minutes: i32,
     price_cents: i32,
     active: bool,
 }
@@ -50,6 +52,14 @@ fn check_duration(minutes: i32) -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::BadRequest("服務時長需為 5–1440 分鐘".into()))
+    }
+}
+
+fn check_buffer(minutes: i32) -> Result<(), AppError> {
+    if (0..=120).contains(&minutes) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("整理時間需為 0–120 分鐘".into()))
     }
 }
 
@@ -92,7 +102,7 @@ async fn list(
     .fetch_one(&mut *tx)
     .await?;
     let items = sqlx::query_as::<_, Service>(
-        "SELECT id, name, duration_minutes, price_cents, active FROM services
+        "SELECT id, name, duration_minutes, buffer_minutes, price_cents, active FROM services
          WHERE ($1::boolean IS NULL OR active = $1)
          ORDER BY name, id LIMIT $2 OFFSET $3",
     )
@@ -114,6 +124,8 @@ async fn list(
 struct CreateService {
     name: String,
     duration_minutes: i32,
+    /// 沒給就是 0(沒有整理時間)
+    buffer_minutes: Option<i32>,
     price_cents: Option<i32>,
 }
 
@@ -125,19 +137,22 @@ async fn create(
     ctx.require_manager()?;
     let name = check_name(&req.name)?;
     check_duration(req.duration_minutes)?;
+    let buffer = req.buffer_minutes.unwrap_or(0);
+    check_buffer(buffer)?;
     let price = req.price_cents.unwrap_or(0);
     check_price(price)?;
 
     let mut tx = ctx.begin(&state).await?;
     plan::ensure_service_slot(&mut tx, ctx.tenant_id).await?;
     let service = sqlx::query_as::<_, Service>(
-        "INSERT INTO services (tenant_id, name, duration_minutes, price_cents)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, name, duration_minutes, price_cents, active",
+        "INSERT INTO services (tenant_id, name, duration_minutes, buffer_minutes, price_cents)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, name, duration_minutes, buffer_minutes, price_cents, active",
     )
     .bind(ctx.tenant_id)
     .bind(&name)
     .bind(req.duration_minutes)
+    .bind(buffer)
     .bind(price)
     .fetch_one(&mut *tx)
     .await?;
@@ -148,7 +163,11 @@ async fn create(
         "service.created",
         "service",
         Some(service.id),
-        json!({ "duration_minutes": service.duration_minutes, "price_cents": service.price_cents }),
+        json!({
+            "duration_minutes": service.duration_minutes,
+            "buffer_minutes": service.buffer_minutes,
+            "price_cents": service.price_cents
+        }),
     )
     .await?;
     tx.commit().await?;
@@ -162,7 +181,7 @@ async fn get_one(
 ) -> Result<Json<Service>, AppError> {
     let mut tx = ctx.begin(&state).await?;
     let service = sqlx::query_as::<_, Service>(
-        "SELECT id, name, duration_minutes, price_cents, active FROM services WHERE id = $1",
+        "SELECT id, name, duration_minutes, buffer_minutes, price_cents, active FROM services WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -175,6 +194,7 @@ async fn get_one(
 struct UpdateService {
     name: Option<String>,
     duration_minutes: Option<i32>,
+    buffer_minutes: Option<i32>,
     price_cents: Option<i32>,
     active: Option<bool>,
 }
@@ -189,6 +209,9 @@ async fn update(
     let name = req.name.as_deref().map(check_name).transpose()?;
     if let Some(m) = req.duration_minutes {
         check_duration(m)?;
+    }
+    if let Some(m) = req.buffer_minutes {
+        check_buffer(m)?;
     }
     if let Some(p) = req.price_cents {
         check_price(p)?;
@@ -214,6 +237,9 @@ async fn update(
     if let Some(v) = req.duration_minutes {
         changed.insert("duration_minutes".into(), json!(v));
     }
+    if let Some(v) = req.buffer_minutes {
+        changed.insert("buffer_minutes".into(), json!(v));
+    }
     if let Some(v) = req.price_cents {
         changed.insert("price_cents".into(), json!(v));
     }
@@ -224,14 +250,16 @@ async fn update(
         "UPDATE services SET
             name = COALESCE($2, name),
             duration_minutes = COALESCE($3, duration_minutes),
-            price_cents = COALESCE($4, price_cents),
-            active = COALESCE($5, active)
+            buffer_minutes = COALESCE($4, buffer_minutes),
+            price_cents = COALESCE($5, price_cents),
+            active = COALESCE($6, active)
          WHERE id = $1
-         RETURNING id, name, duration_minutes, price_cents, active",
+         RETURNING id, name, duration_minutes, buffer_minutes, price_cents, active",
     )
     .bind(id)
     .bind(name)
     .bind(req.duration_minutes)
+    .bind(req.buffer_minutes)
     .bind(req.price_cents)
     .bind(req.active)
     .fetch_optional(&mut *tx)
