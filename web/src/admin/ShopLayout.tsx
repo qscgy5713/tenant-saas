@@ -17,6 +17,7 @@ import {
   UsersIcon,
 } from '../components/Icons'
 import { ErrorState, Loading } from '../components/States'
+import { formatDateTime } from '../lib/time'
 import { useTitle } from '../lib/useTitle'
 import { getShop } from './api'
 import { useLogout } from './logout'
@@ -159,6 +160,21 @@ export function ShopLayout() {
               <LogOutIcon width={16} height={16} />
             </button>
           </header>
+          {ctx.shop.deletion_scheduled_at && (
+            <div className="notice notice-warning deletion-banner" role="status">
+              這家店已申請刪除:公開預約頁已關閉,
+              {formatDateTime(ctx.shop.deletion_scheduled_at, ctx.shop.timezone)}
+              之後會連同所有資料永久刪除。
+              {ctx.isOwner ? (
+                <>
+                  {' '}
+                  <Link to={`/admin/${slug}/settings`}>到設定頁取消刪除</Link>
+                </>
+              ) : (
+                ' 只有擁有者可以取消。'
+              )}
+            </div>
+          )}
           <main className="admin-content">
             <Outlet />
           </main>

@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { MyShop, Role, User } from '../admin/types'
+import type { Role, ShopDetail, User } from '../admin/types'
 import { setSession } from '../admin/session'
 import { API, server } from './server'
 
@@ -15,12 +15,14 @@ export function loginAs(user: User = USER) {
   setSession(user)
 }
 
-export const SHOP = (role: Role = 'owner'): MyShop => ({
+export const SHOP = (role: Role = 'owner'): ShopDetail => ({
   id: 't1',
   slug: 'demo-salon',
   name: '森林系髮廊',
   timezone: 'Asia/Taipei',
   role,
+  customer_retention_days: 730,
+  deletion_scheduled_at: null,
 })
 
 /** 註冊「我在這家店的身分」,測試各角色看到的畫面 */

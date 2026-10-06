@@ -1980,3 +1980,11 @@
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+
+.danger-zone {
+  border-color: var(--danger, #c0392b);
+}
+.deletion-banner {
+  margin: 0 0 12px;
+  border-radius: 0;
+}

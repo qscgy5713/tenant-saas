@@ -12,6 +12,7 @@ import type {
   Invitation,
   Member,
   MyShop,
+  ShopDetail,
   Page,
   PlanInfo,
   PlanUsage,
@@ -79,9 +80,23 @@ export const createShop = (body: { slug: string; name: string; timezone: string 
 
 /** 修改店名 / 時區(僅店主)。網址代稱不可改 */
 export const updateShop = (slug: string, body: { name?: string; timezone?: string }) =>
-  call<MyShop>(`/t/${enc(slug)}`, send('PATCH', body))
+  call<ShopDetail>(`/t/${enc(slug)}`, send('PATCH', body))
 
-export const getShop = (slug: string) => call<MyShop>(`/t/${enc(slug)}/me`)
+export const getShop = (slug: string) => call<ShopDetail>(`/t/${enc(slug)}/me`)
+
+/** 顧客個資保留天數(僅店主,90–3650) */
+export const setDataRetention = (slug: string, customerRetentionDays: number) =>
+  call<ShopDetail>(
+    `/t/${enc(slug)}/data-retention`,
+    send('PUT', { customer_retention_days: customerRetentionDays }),
+  )
+
+/** 申請刪除店家(僅店主):30 天寬限,公開預約頁立即關閉 */
+export const requestShopDeletion = (slug: string, confirmSlug: string) =>
+  call<ShopDetail>(`/t/${enc(slug)}/deletion`, send('POST', { confirm_slug: confirmSlug }))
+
+export const cancelShopDeletion = (slug: string) =>
+  call<ShopDetail>(`/t/${enc(slug)}/deletion`, { method: 'DELETE' })
 
 // ---------- 預約 ----------
 export const listBookings = (slug: string, q: BookingQuery = {}) =>

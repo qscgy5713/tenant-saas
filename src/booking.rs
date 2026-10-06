@@ -286,6 +286,17 @@ pub async fn create_booking(
         BookingStatus::Pending | BookingStatus::Confirmed
     ));
     check_start_in_window(input.start)?;
+    // 申請刪除的店家不再接受新預約(否則「沒有未來預約才能申請」的前提會被繞過,顧客會被撲空)
+    let deleting: bool =
+        sqlx::query_scalar("SELECT deletion_scheduled_at IS NOT NULL FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    if deleting {
+        return Err(AppError::Conflict(
+            "這家店已申請刪除,不能再新增預約(要繼續營業請先到設定頁取消刪除)".into(),
+        ));
+    }
 
     let name = input.customer.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 100 {

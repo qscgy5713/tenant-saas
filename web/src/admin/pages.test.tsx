@@ -1731,7 +1731,8 @@ describe('店家設定', () => {
     renderApp('/admin/demo-salon/settings')
     const user = userEvent.setup()
     const name = await screen.findByLabelText('店家名稱')
-    const save = screen.getByRole('button', { name: '儲存' })
+    const profile = name.closest('form')!
+    const save = within(profile).getByRole('button', { name: '儲存' })
     expect(save).toBeDisabled() // 沒改任何東西
     expect(screen.queryByText(/不會移動/)).not.toBeInTheDocument()
 
@@ -1744,7 +1745,7 @@ describe('店家設定', () => {
 
     await user.selectOptions(screen.getByLabelText('店家所在時區'), 'Asia/Tokyo')
     expect(screen.getByText(/不會移動/)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '儲存' }))
+    await user.click(within(profile).getByRole('button', { name: '儲存' }))
     await waitFor(() => expect(s.calls).toHaveLength(2))
     expect(s.calls[1].body).toEqual({ timezone: 'Asia/Tokyo' })
   })
@@ -1761,14 +1762,144 @@ describe('店家設定', () => {
     renderApp('/admin/demo-salon/settings')
     const user = userEvent.setup()
     const name = await screen.findByLabelText('店家名稱')
+    const profile = name.closest('form')!
     await user.clear(name)
-    await user.click(screen.getByRole('button', { name: '儲存' }))
+    await user.click(within(profile).getByRole('button', { name: '儲存' }))
     expect(await screen.findByText(/店家名稱/, { selector: '.field-msg' })).toBeInTheDocument()
     expect(s.calls).toHaveLength(0)
 
     await user.type(name, '森林系髮廊2')
-    await user.click(screen.getByRole('button', { name: '儲存' }))
+    await user.click(within(profile).getByRole('button', { name: '儲存' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('不支援的時區')
+  })
+})
+
+describe('資料保留與刪除店家', () => {
+  it('顧客資料保留天數:範圍 90–3650 在前端擋下;送出新的天數;沒改就不能儲存', async () => {
+    mockShopMe('owner')
+    const s = spy<{ customer_retention_days?: number }>()
+    server.use(
+      http.put(`${API}/t/demo-salon/data-retention`, async ({ request }) => {
+        await s.record(request)
+        return HttpResponse.json({ ...SHOP('owner'), customer_retention_days: 365 })
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    const days = await screen.findByLabelText('保留天數')
+    expect(days).toHaveValue('730')
+    const form = days.closest('form')!
+    const save = within(form).getByRole('button', { name: '儲存' })
+    expect(save).toBeDisabled() // 沒改
+
+    await user.clear(days)
+    await user.type(days, '30')
+    expect(within(form).getByText(/90 到 3650/)).toBeInTheDocument()
+    expect(save).toBeDisabled()
+    expect(s.calls).toHaveLength(0)
+
+    await user.clear(days)
+    await user.type(days, '365')
+    await user.click(save)
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({ customer_retention_days: 365 })
+    expect(await within(form).findByText('已儲存。')).toBeInTheDocument()
+  })
+
+  it('刪除店家:要輸入網址代稱確認;送出後顯示預定刪除時間與取消按鈕', async () => {
+    mockShopMe('owner')
+    const s = spy<{ confirm_slug?: string }>()
+    let scheduled: string | null = null
+    server.use(
+      http.get(`${API}/t/demo-salon/me`, () =>
+        HttpResponse.json({ ...SHOP('owner'), deletion_scheduled_at: scheduled }),
+      ),
+      http.post(`${API}/t/demo-salon/deletion`, async ({ request }) => {
+        await s.record(request)
+        scheduled = '2026-11-05T02:00:00Z'
+        return HttpResponse.json({ ...SHOP('owner'), deletion_scheduled_at: scheduled })
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '刪除這家店' }))
+    const dialog = await screen.findByRole('dialog')
+    // 沒輸入 / 輸入錯誤:不送出
+    await user.click(within(dialog).getByRole('button', { name: '申請刪除' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('不符')
+    await user.type(within(dialog).getByLabelText('網址代稱'), 'wrong-slug')
+    await user.click(within(dialog).getByRole('button', { name: '申請刪除' }))
+    expect(s.calls).toHaveLength(0)
+
+    await user.clear(within(dialog).getByLabelText('網址代稱'))
+    await user.type(within(dialog).getByLabelText('網址代稱'), 'demo-salon')
+    await user.click(within(dialog).getByRole('button', { name: '申請刪除' }))
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({ confirm_slug: 'demo-salon' })
+    // 設定頁與全站橫幅都顯示預定刪除時間(店家時區)
+    expect((await screen.findAllByText(/2026年11月5日/)).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '取消刪除' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '刪除這家店' })).not.toBeInTheDocument()
+  })
+
+  it('後端拒絕(還有未來預約)→ 原因顯示在視窗裡,視窗不關', async () => {
+    mockShopMe('owner')
+    server.use(
+      http.post(`${API}/t/demo-salon/deletion`, () =>
+        error(409, '還有未來或待確認的預約,請先取消(顧客會收到通知)再申請刪除'),
+      ),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '刪除這家店' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('網址代稱'), 'demo-salon')
+    await user.click(within(dialog).getByRole('button', { name: '申請刪除' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('還有未來或待確認的預約')
+    expect(dialog).toHaveAttribute('open')
+  })
+
+  it('已申請刪除:可以取消;取消後恢復「刪除這家店」', async () => {
+    mockShopMe('owner')
+    let scheduled: string | null = '2026-11-05T02:00:00Z'
+    let cancelled = 0
+    server.use(
+      http.get(`${API}/t/demo-salon/me`, () =>
+        HttpResponse.json({ ...SHOP('owner'), deletion_scheduled_at: scheduled }),
+      ),
+      http.delete(`${API}/t/demo-salon/deletion`, () => {
+        cancelled += 1
+        scheduled = null
+        return HttpResponse.json({ ...SHOP('owner'), deletion_scheduled_at: null })
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '取消刪除' }))
+    expect(await screen.findByRole('button', { name: '刪除這家店' })).toBeInTheDocument()
+    expect(cancelled).toBe(1)
+  })
+
+  it('全站橫幅:非店主看得到「已申請刪除」但不能取消;沒申請時不顯示', async () => {
+    mockShopMe('staff')
+    server.use(
+      http.get(`${API}/t/demo-salon/me`, () =>
+        HttpResponse.json({
+          ...SHOP('staff'),
+          deletion_scheduled_at: '2026-11-05T02:00:00Z',
+        }),
+      ),
+    )
+    const first = renderApp('/admin/demo-salon')
+    const banner = await screen.findByText(/這家店已申請刪除/)
+    expect(banner).toHaveTextContent('只有擁有者可以取消')
+    expect(screen.queryByRole('link', { name: '到設定頁取消刪除' })).not.toBeInTheDocument()
+    first.unmount()
+
+    mockShopMe('owner')
+    renderApp('/admin/demo-salon')
+    await screen.findByRole('heading', { name: /總覽|今天/ })
+    expect(screen.queryByText(/這家店已申請刪除/)).not.toBeInTheDocument()
   })
 })
 

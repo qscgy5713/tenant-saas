@@ -282,6 +282,23 @@ pub fn cancelled_for_staff(
     }
 }
 
+pub fn settings_link(base_url: &str, slug: &str) -> String {
+    format!("{}/admin/{slug}/settings", base(base_url))
+}
+
+pub fn tenant_deletion_requested(to: &str, shop: &str, when: &str, settings_link: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: format!("「{shop}」已申請刪除"),
+        body: format!(
+            "您好,\n\n「{shop}」已申請刪除。公開預約頁已經關閉,到 {when} 之後,\
+             店家與所有資料(服務、預約、顧客、稽核紀錄)會被永久刪除,無法還原。\n\n\
+             如果這不是您的本意,請在那之前到設定頁取消:\n\n  {settings_link}\n\n\
+             如果是您申請的,不需要再做任何事。\n"
+        ),
+    }
+}
+
 pub fn email_verification_link(base_url: &str, token: &str) -> String {
     // 同重設密碼:token 放在 # 之後,不會送到任何伺服器、不進存取紀錄與 Referer
     format!("{}/admin/verify#token={token}", base(base_url))

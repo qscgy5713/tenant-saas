@@ -25,6 +25,14 @@ export interface MyShop {
   role: Role
 }
 
+/** 店家自己的資料(`/t/{slug}/me`):比店家列表多了資料保留與刪除狀態 */
+export interface ShopDetail extends MyShop {
+  /** 顧客個資在最後一筆預約之後保留幾天,到期自動匿名化 */
+  customer_retention_days: number
+  /** 已申請刪除時,預定永久刪除的時間;沒有申請時為 null */
+  deletion_scheduled_at: string | null
+}
+
 export interface Member {
   user_id: string
   name: string

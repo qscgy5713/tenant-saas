@@ -19,6 +19,8 @@ pub struct Config {
     pub public_base_url: String,
     /// 每位使用者最多能「擁有」幾家店(防止灌店家、占用代稱)
     pub max_shops_per_user: u32,
+    /// 稽核日誌保留天數(超過的由背景任務清除)。None = 永久保留
+    pub audit_retention_days: Option<u32>,
     /// 沒驗證 Email 的使用者不能建立店家。只有開發 / 測試能關掉,production 不允許
     pub require_verified_email: bool,
     /// 同一個收件者每小時最多收幾封信(跨店家;防止拿別人的 Email 當收件者騷擾)
@@ -83,6 +85,9 @@ impl Config {
                 .unwrap_or_else(|_| "預約系統 <noreply@localhost>".into()),
             public_base_url,
             max_shops_per_user: parse_max_shops(std::env::var("MAX_SHOPS_PER_USER").ok())?,
+            audit_retention_days: parse_audit_retention(
+                std::env::var("AUDIT_RETENTION_DAYS").ok().as_deref(),
+            )?,
             require_verified_email: parse_require_verified(
                 std::env::var("REQUIRE_VERIFIED_EMAIL").ok(),
                 production,
@@ -230,5 +235,36 @@ mod verified_tests {
         assert!(!parse_require_verified(Some("false".into()), false).unwrap());
         assert!(!parse_require_verified(Some("0".into()), false).unwrap());
         assert!(parse_require_verified(Some("false".into()), true).is_err());
+    }
+}
+
+/// 稽核日誌保留天數:預設 730;`0` = 永久保留;其他值不得少於 90(太短等於沒有稽核)
+pub fn parse_audit_retention(raw: Option<&str>) -> Result<Option<u32>> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(Some(730)),
+        Some(v) => match v.parse::<u32>() {
+            Ok(0) => Ok(None),
+            Ok(n) if n >= 90 => Ok(Some(n)),
+            Ok(_) => bail!("AUDIT_RETENTION_DAYS 不得少於 90(0 = 永久保留)"),
+            Err(_) => bail!("AUDIT_RETENTION_DAYS 必須是整數"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod audit_retention_tests {
+    use super::parse_audit_retention;
+
+    #[test]
+    fn defaults_to_two_years_and_rejects_values_that_would_gut_the_audit_trail() {
+        assert_eq!(parse_audit_retention(None).unwrap(), Some(730));
+        assert_eq!(parse_audit_retention(Some("")).unwrap(), Some(730));
+        assert_eq!(parse_audit_retention(Some("365")).unwrap(), Some(365));
+        assert_eq!(parse_audit_retention(Some("90")).unwrap(), Some(90));
+        assert_eq!(parse_audit_retention(Some("0")).unwrap(), None);
+        assert!(parse_audit_retention(Some("89")).is_err());
+        assert!(parse_audit_retention(Some("1")).is_err());
+        assert!(parse_audit_retention(Some("-5")).is_err());
+        assert!(parse_audit_retention(Some("two years")).is_err());
     }
 }

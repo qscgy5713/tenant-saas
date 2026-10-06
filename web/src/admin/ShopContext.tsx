@@ -1,9 +1,9 @@
 import { createContext, useContext } from 'react'
-import type { MyShop, Role, User } from './types'
+import type { Role, ShopDetail, User } from './types'
 
 export interface ShopCtx {
   slug: string
-  shop: MyShop
+  shop: ShopDetail
   user: User
   role: Role
   /** owner / manager:可以管理服務、成員、查看稽核與方案 */

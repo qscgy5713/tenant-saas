@@ -296,6 +296,8 @@ CREATE POLICY tenant_isolation ON services
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
 | `memberships.active` | 員工停用(離職):false 時進不了這家店、不出現在可預約名單、不佔方案名額;歷史預約保留。見 decisions「員工停用」 | tenant_app(經 `deactivate` / `reactivate` 端點) |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
+| `tenants.customer_retention_days` | 顧客個資保留天數(90–3650,預設 730) | 只能經 `set_customer_retention`(僅店主) |
+| `tenants.deletion_requested_at` / `deletion_scheduled_at` | 申請刪除;非 NULL 時公開預約頁與預約管理連結關閉、不能新增預約 | 只能經 `request_tenant_deletion` / `cancel_tenant_deletion`(僅店主);期滿由 `retention_delete_tenants`(worker)刪除 |
 | `users.email_verified_at` | 沒驗證不能建立店家。既有使用者上線前以註冊時間回填(視為已驗證)。證據:驗證信連結、重設密碼連結、接受寄到該 Email 的邀請 | 只能經 `verify_email` / `reset_password` / `accept_invitation`(SECURITY DEFINER) |
 | `users.sessions_revoked_at` | 「登出所有裝置」:簽發時間早於**或等於**它的 JWT 一律拒絕 | 只能經 `revoke_sessions` |
 | `email_verifications` | 驗證連結(只存 SHA-256、24 小時、一次性) | **只能經** `request_email_verification` / `verify_email`;每位使用者每小時最多 3 封 |

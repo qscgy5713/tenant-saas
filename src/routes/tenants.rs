@@ -2,8 +2,9 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -11,9 +12,9 @@ use uuid::Uuid;
 use super::AppState;
 use crate::{
     auth::AuthUser,
-    db::{PG_UNIQUE_VIOLATION, begin_scoped},
+    db::{PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
     error::AppError,
-    plan,
+    mail, outbox, plan,
     tenancy::{Role, TenantCtx},
 };
 
@@ -22,6 +23,11 @@ pub fn routes() -> Router<AppState> {
         .route("/tenants", post(create_tenant).get(list_tenants))
         .route("/t/{slug}", patch(update_tenant))
         .route("/t/{slug}/me", get(tenant_me))
+        .route("/t/{slug}/data-retention", put(set_data_retention))
+        .route(
+            "/t/{slug}/deletion",
+            post(request_deletion).delete(cancel_deletion),
+        )
         .route("/t/{slug}/members", get(list_members))
         .route("/t/{slug}/plan", get(get_plan))
         .route("/plans", get(list_plans))
@@ -164,20 +170,25 @@ struct TenantMeResponse {
     name: String,
     timezone: String,
     role: Role,
+    /// 顧客個資在最後一筆預約之後保留幾天,到期自動匿名化
+    customer_retention_days: i32,
+    /// 申請刪除後預定刪除的時間;沒有申請時為 null
+    deletion_scheduled_at: Option<DateTime<Utc>>,
 }
+
+const TENANT_ME_SQL: &str = "SELECT id, slug, name, timezone, $1::member_role AS role,
+        customer_retention_days, deletion_scheduled_at FROM tenants WHERE id = $2";
 
 async fn tenant_me(
     State(state): State<AppState>,
     ctx: TenantCtx,
 ) -> Result<Json<TenantMeResponse>, AppError> {
     let mut tx = ctx.begin(&state).await?;
-    let row = sqlx::query_as::<_, TenantMeResponse>(
-        "SELECT id, slug, name, timezone, $1::member_role AS role FROM tenants WHERE id = $2",
-    )
-    .bind(ctx.role)
-    .bind(ctx.tenant_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
     tx.rollback().await?;
     Ok(Json(row))
 }
@@ -281,13 +292,144 @@ async fn update_tenant(
         .bind(&req.timezone)
         .execute(&mut *tx)
         .await?;
-    let row = sqlx::query_as::<_, TenantMeResponse>(
-        "SELECT id, slug, name, timezone, $1::member_role AS role FROM tenants WHERE id = $2",
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(row))
+}
+
+#[derive(Debug, Deserialize)]
+struct RetentionRequest {
+    customer_retention_days: i32,
+}
+
+/// 調整顧客個資的保留天數(僅店主,90–3650)。不追溯放寬:已經匿名化的不會還原
+async fn set_data_retention(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Json(req): Json<RetentionRequest>,
+) -> Result<Json<TenantMeResponse>, AppError> {
+    ctx.require_owner()?;
+    if !(90..=3650).contains(&req.customer_retention_days) {
+        return Err(AppError::BadRequest(
+            "保留天數需介於 90 到 3650 天(約 3 個月到 10 年)".into(),
+        ));
+    }
+    let mut tx = ctx.begin(&state).await?;
+    sqlx::query("SELECT set_customer_retention($1)")
+        .bind(req.customer_retention_days)
+        .execute(&mut *tx)
+        .await?;
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(row))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeletionRequest {
+    /// 要求輸入店家的網址代稱確認,避免手滑
+    confirm_slug: String,
+}
+
+/// 申請刪除店家(僅店主)。寬限期 30 天:公開預約頁立即關閉,後台照常,店主可以取消;期滿由背景任務連同所有資料刪除。
+/// 還有未來 / 待確認的預約、或還有進行中的訂閱時不能申請。
+async fn request_deletion(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(req): Json<DeletionRequest>,
+) -> Result<Json<TenantMeResponse>, AppError> {
+    ctx.require_owner()?;
+    if req.confirm_slug.trim() != slug {
+        return Err(AppError::BadRequest("確認用的網址代稱不符".into()));
+    }
+    let mut tx = ctx.begin(&state).await?;
+    let when: Result<DateTime<Utc>, sqlx::Error> =
+        sqlx::query_scalar("SELECT request_tenant_deletion($1)")
+            .bind(crate::worker::TENANT_DELETION_GRACE_DAYS)
+            .fetch_one(&mut *tx)
+            .await;
+    let when = match when {
+        Ok(w) => w,
+        Err(e) => {
+            return Err(match pg_code(&e).as_deref() {
+                Some("P0001") => AppError::Conflict(
+                    "還有未來或待確認的預約,請先取消(顧客會收到通知)再申請刪除".into(),
+                ),
+                Some("P0002") => {
+                    AppError::Conflict("還有進行中的訂閱,請先取消訂閱再申請刪除".into())
+                }
+                Some("P0003") => AppError::Conflict("已經申請過刪除了".into()),
+                _ => e.into(),
+            });
+        }
+    };
+    let (shop, tz): (String, String) =
+        sqlx::query_as("SELECT name, timezone FROM tenants WHERE id = $1")
+            .bind(ctx.tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let tz: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
+    // 通知所有店主(不只是申請的人):刪除是影響整家店的大事
+    let owners: Vec<String> = sqlx::query_scalar(
+        "SELECT u.email::text FROM memberships m JOIN users u ON u.id = m.user_id
+         WHERE m.role = 'owner' AND m.active",
     )
-    .bind(ctx.role)
-    .bind(ctx.tenant_id)
-    .fetch_one(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+    for to in owners {
+        let msg = mail::tenant_deletion_requested(
+            &to,
+            &shop,
+            &mail::format_local(when, tz),
+            &mail::settings_link(&state.public_base_url, &slug),
+        );
+        outbox::enqueue(
+            &mut tx,
+            ctx.tenant_id,
+            &msg,
+            Some(&format!(
+                "tenant_deletion:{}:{}:{to}",
+                ctx.tenant_id,
+                when.timestamp()
+            )),
+        )
+        .await?;
+    }
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(row))
+}
+
+/// 取消刪除(寬限期內,僅店主)
+async fn cancel_deletion(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+) -> Result<Json<TenantMeResponse>, AppError> {
+    ctx.require_owner()?;
+    let mut tx = ctx.begin(&state).await?;
+    let cancelled: bool = sqlx::query_scalar("SELECT cancel_tenant_deletion()")
+        .fetch_one(&mut *tx)
+        .await?;
+    if !cancelled {
+        return Err(AppError::Conflict("這家店沒有在申請刪除".into()));
+    }
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Json(row))
 }

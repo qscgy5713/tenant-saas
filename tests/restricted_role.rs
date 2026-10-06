@@ -591,6 +591,114 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         .0,
         StatusCode::NOT_FOUND
     );
+
+    // 5. 資料保留(retention_* 函式由 worker 角色執行;店主端的函式由 tenant_app 執行)
+    // 5a. worker 角色能呼叫稽核清除與匿名化(現有資料都很新,所以不會真的刪 / 匿名化任何東西)
+    {
+        let mut tx = tenant_saas::db::begin_worker(&pool).await.unwrap();
+        let purged: i32 = sqlx::query_scalar("SELECT retention_purge_audit(730, 10)")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("worker 要能執行稽核清除");
+        assert_eq!(purged, 0);
+        let nobody: bool = sqlx::query_scalar("SELECT retention_anonymize_customer($1, $2)")
+            .bind(Uuid::new_v4())
+            .bind(Uuid::new_v4())
+            .fetch_one(&mut *tx)
+            .await
+            .expect("worker 要能執行匿名化函式");
+        assert!(!nobody);
+        tx.commit().await.unwrap();
+    }
+    // 5b. 店主調整保留天數、申請與取消刪除(tenant_app)
+    let (status, body) = call(
+        &app,
+        Method::PUT,
+        &format!("/t/{slug}/data-retention"),
+        Some(json!({"customer_retention_days": 365})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // 5c. 刪除店家:要穿過 FORCE ROW LEVEL SECURITY 的資料表(customers、services、working_hours…)。
+    // 另開一家有資料的店,以 0 天寬限申請(API 固定 30 天,這裡直接呼叫函式),讓背景任務立刻刪除
+    let doomed = format!("{slug}-x");
+    assert_eq!(
+        create_tenant(&app, &owner, &doomed).await.0,
+        StatusCode::CREATED
+    );
+    let service = create_service(&app, &owner, &doomed, "會被刪掉的服務").await;
+    let owner_id = owner_uuid(&me);
+    let (status, _) = call(
+        &app,
+        Method::PUT,
+        &format!("/t/{doomed}/members/{owner_id}/working-hours"),
+        Some(json!({"hours": [{"weekday": 1, "start": "09:00", "end": "12:00"}]})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        &app,
+        Method::PUT,
+        &format!("/t/{doomed}/members/{owner_id}/services"),
+        Some(json!({"service_ids": [service["id"]]})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let doomed_id: Uuid = {
+        let mut tx = tenant_saas::db::begin_scoped(&pool, Some(owner_id), None)
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar("SELECT id FROM tenants WHERE slug = $1")
+            .bind(&doomed)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        id
+    };
+    {
+        let mut tx = tenant_saas::db::begin_scoped(&pool, Some(owner_id), Some(doomed_id))
+            .await
+            .unwrap();
+        sqlx::query("SELECT request_tenant_deletion(0)")
+            .execute(&mut *tx)
+            .await
+            .expect("店主要能申請刪除");
+        tx.commit().await.unwrap();
+    }
+    let stats = tenant_saas::worker::retention_sweep(&pool, Some(730)).await;
+    assert_eq!(
+        stats.tenants_deleted, 1,
+        "到期的店家要能在受限帳號下被刪除(含 FORCE RLS 的資料表)"
+    );
+    assert_eq!(
+        call(
+            &app,
+            Method::GET,
+            &format!("/t/{doomed}/me"),
+            None,
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    // 原本那家店不受影響
+    assert_eq!(
+        call(
+            &app,
+            Method::GET,
+            &format!("/t/{slug}/me"),
+            None,
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
 }
 
 fn owner_uuid(me: &Value) -> Uuid {

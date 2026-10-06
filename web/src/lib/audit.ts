@@ -36,6 +36,11 @@ const ACTION_LABEL: Record<string, string> = {
   'customer.viewed': '查看顧客資料',
   'billing.payment_failed': '訂閱扣款失敗',
   'billing.payment_recovered': '訂閱付款已恢復',
+  'customer.anonymized': '匿名化顧客資料',
+  'tenant.retention_changed': '調整顧客資料保留天數',
+  'tenant.deletion_requested': '申請刪除店家',
+  'tenant.deletion_cancelled': '取消刪除店家',
+  'audit.purged': '清除過期的稽核紀錄',
 }
 
 const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }
@@ -95,6 +100,18 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
       })
       return parts.length ? parts.join('、') : null
     }
+    case 'customer.anonymized':
+      return d.reason === 'retention' ? '超過保留天數,系統自動匿名化' : null
+    case 'tenant.retention_changed':
+      return num(d.from) !== null && num(d.to) !== null
+        ? `${num(d.from)} 天 → ${num(d.to)} 天`
+        : null
+    case 'tenant.deletion_requested':
+      return str(d.scheduled_at)
+        ? `預定 ${formatDateTime(str(d.scheduled_at)!, timeZone)} 永久刪除`
+        : null
+    case 'audit.purged':
+      return num(d.rows) !== null ? `清除 ${num(d.rows)} 筆超過保留期限的紀錄` : null
     case 'member.role_changed':
       return `${ROLE[str(d.from) ?? ''] ?? d.from} → ${ROLE[str(d.to) ?? ''] ?? d.to}`
     case 'member.deactivated':

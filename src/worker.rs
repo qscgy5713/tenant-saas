@@ -270,16 +270,128 @@ async fn cleanup(pool: &PgPool) -> Result<u64, AppError> {
     Ok(n)
 }
 
+/// 保留政策的清理一次最多處理幾筆(一次做不完,下一輪接著做)
+const RETENTION_BATCH: i32 = 200;
+/// 保留政策的清理多久跑一次(不需要每個 tick 都跑)
+const RETENTION_EVERY: Duration = Duration::from_secs(3600);
+/// 刪除店家的寬限期(天)
+pub const TENANT_DELETION_GRACE_DAYS: i32 = 30;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RetentionStats {
+    pub customers_anonymized: u64,
+    pub audit_rows_purged: u64,
+    pub tenants_deleted: u64,
+}
+
+/// 資料保留政策:匿名化過期的顧客、清除過期的稽核日誌、刪除寬限期已滿的店家。
+/// 各階段獨立,一個失敗不影響其他。每個階段一次最多處理 `RETENTION_BATCH` 筆,做不完下一輪再做。
+pub async fn retention_sweep(pool: &PgPool, audit_days: Option<u32>) -> RetentionStats {
+    fn or_log<T: Default>(stage: &str, result: Result<T, AppError>) -> T {
+        result.unwrap_or_else(|err| {
+            tracing::error!(stage, error = %err, "保留政策階段失敗");
+            T::default()
+        })
+    }
+    RetentionStats {
+        customers_anonymized: or_log(
+            "anonymize_customers",
+            anonymize_expired_customers(pool).await,
+        ),
+        audit_rows_purged: match audit_days {
+            Some(days) => or_log("purge_audit", purge_audit(pool, days).await),
+            None => 0,
+        },
+        tenants_deleted: or_log("delete_tenants", delete_due_tenants(pool).await),
+    }
+}
+
+/// 找出超過各店保留天數的顧客,逐一交給資料庫函式(函式會自己再確認一次,不信任這份名單)
+async fn anonymize_expired_customers(pool: &PgPool) -> Result<u64, AppError> {
+    let mut tx = begin_worker(pool).await?;
+    let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT c.id, c.tenant_id
+         FROM customers c JOIN tenants t ON t.id = c.tenant_id
+         WHERE c.email::text NOT LIKE '%@anonymized.invalid'
+           AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.customer_id = c.id
+                           AND (b.status = 'pending' OR (b.status = 'confirmed' AND b.starts_at > now())))
+           AND COALESCE((SELECT max(b.starts_at) FROM bookings b WHERE b.customer_id = c.id), c.created_at)
+               < now() - make_interval(days => t.customer_retention_days)
+         ORDER BY c.created_at LIMIT $1",
+    )
+    .bind(i64::from(RETENTION_BATCH))
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut done = 0;
+    for (customer, tenant) in candidates {
+        let did: bool = sqlx::query_scalar("SELECT retention_anonymize_customer($1, $2)")
+            .bind(customer)
+            .bind(tenant)
+            .fetch_one(&mut *tx)
+            .await?;
+        if did {
+            done += 1;
+        }
+    }
+    tx.commit().await?;
+    if done > 0 {
+        metrics::counter!("customers_anonymized_total").increment(done);
+        tracing::info!(count = done, "依保留政策匿名化顧客");
+    }
+    Ok(done)
+}
+
+async fn purge_audit(pool: &PgPool, days: u32) -> Result<u64, AppError> {
+    let mut tx = begin_worker(pool).await?;
+    let n: i32 = sqlx::query_scalar("SELECT retention_purge_audit($1, $2)")
+        .bind(i32::try_from(days).unwrap_or(i32::MAX))
+        .bind(RETENTION_BATCH * 25)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if n > 0 {
+        metrics::counter!("audit_rows_purged_total").increment(n as u64);
+        tracing::info!(rows = n, "依保留政策清除過期的稽核日誌");
+    }
+    Ok(n as u64)
+}
+
+async fn delete_due_tenants(pool: &PgPool) -> Result<u64, AppError> {
+    let mut tx = begin_worker(pool).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT retention_delete_tenants($1)")
+        .bind(10)
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    for id in &ids {
+        // 只記 id:店家的名稱與代稱也是申請刪除的資料,不留在日誌
+        tracing::warn!(tenant_id = %id, "寬限期已滿,店家與其所有資料已刪除");
+    }
+    if !ids.is_empty() {
+        metrics::counter!("tenants_deleted_total").increment(ids.len() as u64);
+    }
+    Ok(ids.len() as u64)
+}
+
 /// 常駐迴圈:每隔 `poll` 跑一次 `tick`,收到關閉訊號就結束
 pub async fn run(
     pool: PgPool,
     mailer: Mailer,
     public_base_url: String,
     poll: Duration,
+    audit_retention_days: Option<u32>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     tracing::info!(?poll, "背景 worker 啟動");
+    let mut last_sweep: Option<std::time::Instant> = None;
     while !*shutdown.borrow() {
+        if last_sweep.is_none_or(|t| t.elapsed() >= RETENTION_EVERY) {
+            last_sweep = Some(std::time::Instant::now());
+            let stats = retention_sweep(&pool, audit_retention_days).await;
+            if stats != RetentionStats::default() {
+                tracing::info!(?stats, "保留政策清理");
+            }
+        }
         match tick(&pool, &mailer, &public_base_url).await {
             Ok(stats) if stats != TickStats::default() => {
                 metrics::counter!("emails_sent_total").increment(stats.sent);

@@ -727,6 +727,7 @@ async fn background_loop_delivers_mail_and_stops_on_shutdown(pool: PgPool) {
         Mailer::Memory(memory.clone()),
         "http://app.test".to_string(),
         StdDuration::from_millis(50),
+        Some(730),
         rx,
     ));
 

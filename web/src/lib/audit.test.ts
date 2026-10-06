@@ -97,6 +97,36 @@ describe('describeDetail', () => {
     expect(actionLabel('billing.payment_recovered')).toBe('訂閱付款已恢復')
   })
 
+  it('資料保留與刪除店家', () => {
+    expect(actionLabel('customer.anonymized')).toBe('匿名化顧客資料')
+    expect(
+      describeDetail(entry({ action: 'customer.anonymized', detail: { reason: 'retention' } }), tz),
+    ).toBe('超過保留天數,系統自動匿名化')
+    // 店主手動刪除的沒有 reason,沒有可說的就是 null
+    expect(
+      describeDetail(entry({ action: 'customer.anonymized', detail: { bookings: 2 } }), tz),
+    ).toBeNull()
+    expect(
+      describeDetail(
+        entry({ action: 'tenant.retention_changed', detail: { from: 730, to: 90 } }),
+        tz,
+      ),
+    ).toBe('730 天 → 90 天')
+    expect(
+      describeDetail(
+        entry({
+          action: 'tenant.deletion_requested',
+          detail: { scheduled_at: '2026-11-05T02:00:00Z' },
+        }),
+        tz,
+      ),
+    ).toContain('2026年11月5日')
+    expect(describeDetail(entry({ action: 'audit.purged', detail: { rows: 12 } }), tz)).toBe(
+      '清除 12 筆超過保留期限的紀錄',
+    )
+    expect(actionLabel('tenant.deletion_cancelled')).toBe('取消刪除店家')
+  })
+
   it('停用 / 重新啟用成員', () => {
     expect(actionLabel('member.deactivated')).toBe('停用成員')
     expect(actionLabel('booking.reassigned')).toBe('改派預約')
@@ -178,6 +208,9 @@ describe('describeDetail', () => {
       'booking.rescheduled',
       'billing.plan_changed',
       'billing.payment_failed',
+      'tenant.retention_changed',
+      'tenant.deletion_requested',
+      'audit.purged',
       'billing.checkout_started',
       'member.role_changed',
       'booking.created',

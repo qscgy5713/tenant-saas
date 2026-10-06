@@ -29,6 +29,7 @@ pub fn test_config(ttl: u64) -> Config {
         max_shops_per_user: 5,
         // 一般測試註冊後直接開店;驗證流程由 tests/email_verification.rs 用 app_strict 驗證
         require_verified_email: false,
+        audit_retention_days: Some(730),
         max_mails_per_recipient_per_hour: 100_000,
         allowed_origins: vec!["http://app.test".into()],
         worker_enabled: false,

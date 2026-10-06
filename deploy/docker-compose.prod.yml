@@ -19,6 +19,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?前端網址,例如 https://book.example.com}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-730}
       # 前面有 web(nginx)附加 X-Forwarded-For,可以信任
       TRUST_PROXY: "true"
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}

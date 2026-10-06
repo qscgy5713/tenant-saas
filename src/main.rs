@@ -111,6 +111,7 @@ async fn serve() -> Result<()> {
             mailer,
             config.public_base_url.clone(),
             Duration::from_secs(config.worker_poll_secs),
+            config.audit_retention_days,
             shutdown_rx,
         )))
     } else {
