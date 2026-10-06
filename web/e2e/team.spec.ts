@@ -7,6 +7,8 @@ import {
   makeBookable,
   taipeiAt,
   taipeiDay,
+  uniq,
+  waitForMail,
 } from './helpers'
 
 test('停用員工:對方進不了這家店,重新啟用後回來', async ({ page, browser, request }) => {
@@ -78,4 +80,32 @@ test('還有未來預約的員工不能停用,原因顯示在視窗裡', async (
   await dialog.getByRole('button', { name: '停用' }).click()
   await expect(dialog.getByRole('alert')).toContainText('1 筆未來已確認的預約')
   await expect(row.getByText('已停用')).toHaveCount(0)
+})
+
+test('停用時把未來預約改派給店主:停用成功,顧客收到人員變更通知', async ({ page, request }) => {
+  const shop = await createShop(request)
+  const staff = await addStaff(request, shop)
+  await makeBookable(request, shop, staff, shop.serviceId)
+  const customerEmail = `cust-${uniq()}@example.com`
+  await bookAsOwner(
+    request,
+    shop,
+    taipeiAt(taipeiDay(3), '10:00'),
+    { name: '王小明', email: customerEmail },
+    staff.id,
+  )
+
+  await signIn(page, shop.owner.email)
+  await page.goto(`/admin/${shop.slug}/team`)
+  const row = page.locator('li.member-row', { hasText: staff.email })
+  await row.getByRole('button', { name: '停用' }).click()
+  const dialog = page.getByRole('dialog')
+  // 這是真實瀏覽器送出的請求:不選改派時 body 是空的、選了才帶 reassign_to
+  await dialog.getByRole('combobox', { name: /改派給/ }).selectOption({ label: '店主阿美' })
+  await dialog.getByRole('button', { name: '停用' }).click()
+  await expect(row.getByText('已停用')).toBeVisible()
+
+  const mail = await waitForMail(request, customerEmail, '人員已變更')
+  expect(mail.text).toContain('店主阿美')
+  expect(mail.text).toContain('員工小安')
 })
