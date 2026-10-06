@@ -39,6 +39,7 @@ export function TeamPage() {
   const [removing, setRemoving] = useState<Member | null>(null)
   const [deactivating, setDeactivating] = useState<Member | null>(null)
   const [revoking, setRevoking] = useState<string | null>(null)
+  const [reassignTo, setReassignTo] = useState('')
 
   const refreshMembers = () => {
     queryClient.invalidateQueries({ queryKey: ['admin', 'members', slug] })
@@ -58,9 +59,10 @@ export function TeamPage() {
     },
   })
   const deactivateMutation = useMutation({
-    mutationFn: (m: Member) => deactivateMember(slug, m.user_id),
+    mutationFn: (m: Member) => deactivateMember(slug, m.user_id, reassignTo || undefined),
     onSuccess: (_d, m) => {
       setDeactivating(null)
+      setReassignTo('')
       refreshMembers()
       if (m.user_id === user.id) {
         // 自己退出:這家店已經進不去了,清掉它的快取並回到店家列表
@@ -226,15 +228,38 @@ export function TeamPage() {
         message={
           deactivating?.user_id === user.id
             ? '退出後你就不能再進入這家店的後台,顧客也不能再預約你。歷史預約會保留,管理者可以讓你重新加入。'
-            : `${deactivating?.name} 會失去這家店的存取權限,顧客也不能再預約他;歷史預約與紀錄會保留,之後可以重新啟用。還有未來已確認的預約時無法停用,請先取消或請顧客改期。`
+            : `${deactivating?.name} 會失去這家店的存取權限,顧客也不能再預約他;歷史預約與紀錄會保留,之後可以重新啟用。還有未來已確認的預約時,請先取消、請顧客改期,或在下方選擇改派給其他成員。`
         }
         confirmLabel={deactivating?.user_id === user.id ? '退出' : '停用'}
+        extra={
+          <div className="field">
+            <label>
+              <span className="field-label">未來已確認的預約改派給(選填)</span>
+              <select
+                name="reassign_to"
+                value={reassignTo}
+                onChange={(e) => setReassignTo(e.target.value)}
+              >
+                <option value="">不改派</option>
+                {members.data
+                  ?.filter((m) => m.active && m.user_id !== deactivating?.user_id)
+                  .map((m) => (
+                    <option key={m.user_id} value={m.user_id}>
+                      {m.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <p className="field-hint">時間不變,顧客會收到通知信;對方在那些時段必須有空。</p>
+          </div>
+        }
         danger
         pending={deactivateMutation.isPending}
         error={errorText(deactivateMutation.error)}
         onConfirm={() => deactivating && deactivateMutation.mutate(deactivating)}
         onClose={() => {
           setDeactivating(null)
+          setReassignTo('')
           deactivateMutation.reset()
         }}
       />

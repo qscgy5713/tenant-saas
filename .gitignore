@@ -1,3 +1,7 @@
 /target
 .env
 .DS_Store
+
+# 正式環境部署的機密
+deploy/.env.prod
+deploy/secrets/

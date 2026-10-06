@@ -250,6 +250,7 @@ async fn webhook(
     let ev = match parsed {
         Parsed::Subscription(ev) => ev,
         Parsed::PaymentFailed(f) => return payment_failed(&state, f).await,
+        Parsed::PaymentPaid(p) => return payment_paid(&state, p).await,
         Parsed::Ignored => {
             return Ok(Json(json!({ "received": true, "result": "ignored" })));
         }
@@ -311,5 +312,29 @@ async fn payment_failed(
         metrics::counter!("payment_failed_notified_total").increment(1);
     }
     tracing::info!(event = %f.event_id, %result, "Stripe 扣款失敗事件已處理");
+    Ok(Json(json!({ "received": true, "result": result })))
+}
+
+/// 發票付清:先前失敗過同一張才通知店主「付款恢復了」;正常的續訂不寄信(收據請在 Stripe Dashboard 開啟)
+async fn payment_paid(
+    state: &AppState,
+    p: billing::PaymentPaid,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let link = mail::plan_link_template(&state.public_base_url);
+    let (subject, body) = mail::payment_recovered(&link);
+    let result: String =
+        sqlx::query_scalar("SELECT billing_payment_recovered($1, $2, $3, $4, $5, $6)")
+            .bind(&p.event_id)
+            .bind(&p.kind)
+            .bind(&p.customer)
+            .bind(&p.invoice)
+            .bind(&subject)
+            .bind(&body)
+            .fetch_one(&state.db)
+            .await?;
+    if result == "applied" {
+        metrics::counter!("payment_recovered_notified_total").increment(1);
+    }
+    tracing::info!(event = %p.event_id, %result, "Stripe 付清事件已處理");
     Ok(Json(json!({ "received": true, "result": result })))
 }

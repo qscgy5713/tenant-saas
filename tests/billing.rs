@@ -663,7 +663,7 @@ async fn unrelated_unknown_and_misconfigured_events_are_handled_safely(pool: PgP
     // 與方案無關的事件:收下(200),不然 Stripe 會一直重送
     let (status, body) = send_event(
         &s.app,
-        json!({"id": "evt_x", "type": "invoice.paid", "created": 1, "data": {"object": {}}}),
+        json!({"id": "evt_x", "type": "charge.succeeded", "created": 1, "data": {"object": {}}}),
     )
     .await;
     assert_eq!(
@@ -1017,4 +1017,147 @@ async fn failure_notice_needs_a_valid_signature(pool: PgPool) {
     let (status, _) = webhook_raw(&s.app, body.as_bytes(), Some("t=1,v1=00")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(deliver(&s.pool).await.is_empty());
+}
+
+// ---------- 付款恢復通知 ----------
+
+fn invoice_paid_event(id: &str, customer: &str, invoice: &str) -> Value {
+    json!({
+        "id": id, "type": "invoice.paid", "created": 1_700_000_100,
+        "data": {"object": {"id": invoice, "customer": customer, "amount_paid": 150_000, "currency": "twd"}}
+    })
+}
+
+fn payment_failed_for(id: &str, customer: &str, invoice: &str) -> Value {
+    json!({
+        "id": id, "type": "invoice.payment_failed", "created": 1_700_000_000,
+        "data": {"object": {
+            "id": invoice, "customer": customer, "amount_due": 150_000, "currency": "twd",
+            "attempt_count": 1, "next_payment_attempt": 1_800_000_000
+        }}
+    })
+}
+
+async fn recovered_audits(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = 'billing.payment_recovered'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn paying_the_failed_invoice_tells_the_owners_it_recovered(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    signup(&s.app, "owner2@example.com").await;
+    add_member(&s.pool, "shop-a", "owner2@example.com", "owner").await;
+    signup(&s.app, "staff@example.com").await;
+    add_member(&s.pool, "shop-a", "staff@example.com", "staff").await;
+    deliver(&s.pool).await;
+
+    send_event(&s.app, payment_failed_for("evt_f", "cus_123", "in_1")).await;
+    deliver(&s.pool).await; // 失敗通知先寄掉
+    let (status, body) = send_event(&s.app, invoice_paid_event("evt_p", "cus_123", "in_1")).await;
+    assert_eq!(
+        (status, body["result"].as_str()),
+        (StatusCode::OK, Some("applied"))
+    );
+
+    let mut sent = deliver(&s.pool).await;
+    sent.sort();
+    let to: Vec<_> = sent.iter().map(|m| m.0.as_str()).collect();
+    assert_eq!(to, ["owner2@example.com", "owner@example.com"], "只有店主");
+    assert!(
+        sent[0].1.contains("付款已恢復") && sent[0].1.contains("店 shop-a"),
+        "{}",
+        sent[0].1
+    );
+    assert!(
+        sent[0].2.contains("http://app.test/admin/shop-a/plan"),
+        "{}",
+        sent[0].2
+    );
+    assert!(
+        !sent[0].2.contains('{'),
+        "樣板欄位都要被代入: {}",
+        sent[0].2
+    );
+    assert_eq!(recovered_audits(&s.pool).await, 1);
+
+    // 重送同一個事件:不會再寄、不會再記
+    let (_, again) = send_event(&s.app, invoice_paid_event("evt_p", "cus_123", "in_1")).await;
+    assert_eq!(again["result"], "duplicate");
+    assert!(deliver(&s.pool).await.is_empty());
+    // 同一張發票再來一個不同的付清事件(Stripe 偶爾會對同一張發票發多個事件):已經恢復過,不再通知
+    let (_, second) = send_event(&s.app, invoice_paid_event("evt_p2", "cus_123", "in_1")).await;
+    assert_eq!(second["result"], "no_prior_failure");
+    assert!(deliver(&s.pool).await.is_empty());
+    assert_eq!(recovered_audits(&s.pool).await, 1);
+}
+
+#[sqlx::test]
+async fn normal_renewals_and_other_invoices_send_no_recovery_mail(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    // 沒失敗過的發票付清 = 正常續訂,不寄信
+    let (_, body) = send_event(&s.app, invoice_paid_event("evt_p1", "cus_123", "in_ok")).await;
+    assert_eq!(body["result"], "no_prior_failure");
+    assert!(deliver(&s.pool).await.is_empty());
+
+    // in_1 失敗;之後付清的是另一張發票(in_2)→ in_1 仍然沒恢復,不能說「恢復了」
+    send_event(&s.app, payment_failed_for("evt_f", "cus_123", "in_1")).await;
+    deliver(&s.pool).await;
+    let (_, body) = send_event(&s.app, invoice_paid_event("evt_p2", "cus_123", "in_2")).await;
+    assert_eq!(body["result"], "no_prior_failure");
+    assert!(deliver(&s.pool).await.is_empty());
+    assert_eq!(recovered_audits(&s.pool).await, 0);
+    // in_1 真的付清了 → 這時才通知
+    let (_, body) = send_event(&s.app, invoice_paid_event("evt_p3", "cus_123", "in_1")).await;
+    assert_eq!(body["result"], "applied");
+    assert_eq!(deliver(&s.pool).await.len(), 1);
+
+    // 不是我們的客戶:收下(200),什麼都不寄
+    let (status, body) =
+        send_event(&s.app, invoice_paid_event("evt_p4", "cus_stranger", "in_9")).await;
+    assert_eq!(
+        (status, body["result"].as_str()),
+        (StatusCode::OK, Some("unknown_customer"))
+    );
+    // 缺少必要欄位:400,而且事件沒被記成「已處理」
+    let (status, _) = send_event(
+        &s.app,
+        json!({"id": "evt_bad", "type": "invoice.paid", "created": 1, "data": {"object": {"id": "in_1"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM stripe_events WHERE id = 'evt_bad'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded, 0);
+}
+
+/// Stripe 不保證順序:付清的事件比失敗的事件先到 → 不能再寄一封已經過時的「扣款失敗」
+#[sqlx::test]
+async fn a_failure_event_arriving_after_the_invoice_was_paid_sends_nothing(pool: PgPool) {
+    let s = shop(pool).await;
+    start_checkout(&s, "pro").await;
+    deliver(&s.pool).await;
+
+    send_event(&s.app, invoice_paid_event("evt_p", "cus_123", "in_1")).await;
+    let (_, late) = send_event(&s.app, payment_failed_for("evt_f", "cus_123", "in_1")).await;
+    assert_eq!(late["result"], "already_paid");
+    assert!(
+        deliver(&s.pool).await.is_empty(),
+        "已經付清的發票不該再收到失敗通知"
+    );
+    assert!(payment_failed_audits(&s.pool).await.is_empty());
+
+    // 別張發票的失敗仍然照常通知
+    let (_, other) = send_event(&s.app, payment_failed_for("evt_f2", "cus_123", "in_2")).await;
+    assert_eq!(other["result"], "applied");
+    assert_eq!(deliver(&s.pool).await.len(), 1);
 }

@@ -111,12 +111,29 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 | `MAX_SHOPS_PER_USER` | | 5 | 每位使用者最多能「擁有」幾家店(防灌店家 / 占用代稱);受邀加入別人的店不算;0 視為設定錯誤 |
 | `TRUST_PROXY` | | false | 見下方「反向代理」 |
 | `STRIPE_SECRET_KEY` | | 空 = 不啟用 | 與 `STRIPE_WEBHOOK_SECRET` 必須同時設定,且至少一個 `STRIPE_PRICE_*`,否則拒絕啟動 |
-| `STRIPE_WEBHOOK_SECRET` | | — | Stripe Dashboard 的 webhook 簽署密鑰(`whsec_…`);webhook 網址 `https://<api>/webhooks/stripe`,訂閱事件 `customer.subscription.created/updated/deleted` 與 `invoice.payment_failed`(付款失敗通知信;沒訂閱這個事件就不會寄) |
+| `STRIPE_WEBHOOK_SECRET` | | — | Stripe Dashboard 的 webhook 簽署密鑰(`whsec_…`);webhook 網址 `https://<api>/webhooks/stripe`,訂閱事件 `customer.subscription.created/updated/deleted` 、`invoice.payment_failed`(付款失敗通知信)與 `invoice.paid`(付款恢復通知信;沒訂閱這兩個事件就不會寄) |
 | `STRIPE_PRICE_PRO`、`STRIPE_PRICE_BUSINESS` | | — | 對應方案的 Stripe Price id;沒設的方案不能線上訂閱 |
 | `STRIPE_API_BASE` | | `https://api.stripe.com` | 測試時指向 `stripe-mock` |
 | `METRICS_TOKEN` | | 空 = 關閉 | ≥ 16 字元;設定後才有 `GET /metrics` |
 | `LOG_FORMAT` | | 映像內 `json` | `json` 或留空 |
 | `RUST_LOG` | | `info` | |
+
+## Docker Compose 部署範例
+
+`deploy/docker-compose.prod.yml`:`app` + `web`(nginx)+ 一次性的 `migrate`(profile)+ 選用的 `prometheus`(profile `monitoring`,已掛上告警規則)。
+**不含資料庫** —— 請用託管的 PostgreSQL,並先照「第一次部署」佈建帳號。
+
+```bash
+cp deploy/env.prod.example deploy/.env.prod        # 填值;.gitignore 已排除
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod --profile migrate run --rm migrate
+docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d
+```
+
+- `app` 不對外開放埠,只有 `web` 與 `prometheus` 能連到;`web` 綁 `127.0.0.1:8080`,TLS 由前面的負載平衡器終止
+- 因為前面是自己的 nginx,compose 裡設了 `TRUST_PROXY=true`(見下方「反向代理與 TLS」);若你在 `web` 前面又加一層代理,要確認每一層都是「附加」而不是「轉傳」
+- 必填的變數沒填會直接報錯(`${VAR:?}`),不會悄悄用空值啟動
+- 要監控:建立 `deploy/secrets/metrics_token`(內容與 `METRICS_TOKEN` 相同),加 `--profile monitoring`
+- **這份範例只驗證過 `docker compose config` 能解析、規則檔能通過 promtool;沒有在真實主機上跑過一次完整部署**
 
 ## 反向代理與 TLS
 
@@ -166,7 +183,15 @@ scrape_configs:
     static_configs: [{ targets: ["app:3001"] }]
 ```
 
-建議的告警(尚未內建規則檔):
+告警規則檔:`deploy/alerts.yml`(9 條,`deploy/alerts_test.yml` 用 `promtool test rules` 驗證過會在該響的時候響)。
+`deploy/prometheus.yml` 是搭配的抓取設定。驗證:
+
+```bash
+docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest check rules /d/alerts.yml
+docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest test rules /d/alerts_test.yml
+```
+
+規則涵蓋的條件(門檻是起點,請依實際流量調整):
 
 | 條件 | 意義 |
 |---|---|
@@ -205,7 +230,8 @@ scrape_configs:
 - [ ] 註冊 Email 驗證、refresh token(JWT 目前只有單一短效 token,無法主動撤銷)
 - [ ] 稽核日誌歸檔、資料保留與刪除政策(個資法 / GDPR 的刪除請求流程)
 - [ ] 全域(跨實例)限流
-- [ ] 告警規則檔、分散式追蹤
+- [x] 告警規則檔(`deploy/alerts.yml`)
+- [ ] 分散式追蹤
 - [x] 前端:顧客預約頁與店家後台(`web/`,nginx 映像)
 - [ ] 負載測試;目前每家店每種限額資源用一把 advisory lock,寫入量極大的單一店家會在該資源上排隊
 

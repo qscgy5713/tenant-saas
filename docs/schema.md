@@ -299,7 +299,7 @@ CREATE POLICY tenant_isolation ON services
 | `users.failed_logins` / `last_failed_login_at` / `locked_until` | 帳號鎖定:5 次 / 15 分鐘;鎖定中不再計數、不延長;距上次失敗超過 15 分鐘重算 | **只能經** `login_failed` / `login_succeeded`(SECURITY DEFINER);`tenant_app` 讀不到 |
 | `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |
 | `password_resets` | token 雜湊、1 小時、單次;每帳號每小時最多 3 筆 | **只能經** `request_password_reset` / `reset_password`(SECURITY DEFINER,授權 runtime) |
-| `tenant_billing` | Stripe 客戶 / 訂閱狀態 / 期末 / 已套用事件時間 | **只能經** `billing_state`、`billing_attach_customer`(租戶上下文)、`billing_apply_event`(webhook,runtime) |
+| `tenant_billing` | Stripe 客戶 / 訂閱狀態 / 期末 / 已套用事件時間 / `last_failed_invoice` / `last_paid_invoice`(付款恢復通知用) | **只能經** `billing_state`、`billing_attach_customer`(租戶上下文)、`billing_apply_event`、`billing_payment_failed`、`billing_payment_recovered`(webhook,runtime) |
 | `stripe_events` | webhook 事件去重 | 同上 |
 
 | 函式 `update_tenant(name, timezone)` | 改店名 / 時區,限店主,寫稽核(0016) | tenant_app 可執行 |

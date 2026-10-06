@@ -1,0 +1,52 @@
+# promtool test rules deploy/alerts_test.yml
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'app_db_up'
+        values: '1 1 0 0 0 0'
+      - series: 'email_outbox_oldest_due_age_seconds'
+        values: '0 0 400 400 400 400 400 400 400 400'
+      - series: 'http_requests_total{status="200"}'
+        values: '0+990x20'
+      - series: 'http_requests_total{status="500"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DatabaseDown
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: 應用程式連不上資料庫
+              description: 預約、登入、寄信都會失敗。先看資料庫與連線字串。
+      - eval_time: 1m
+        alertname: DatabaseDown
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: EmailBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: 信件積壓超過 5 分鐘
+              description: SMTP 壞了或背景 worker 停了(WORKER_ENABLED、worker_tick_errors_total)。顧客收不到確認信就無法完成預約。
+      - eval_time: 4m
+        alertname: EmailBacklog
+        exp_alerts: []
+      # 1% 剛好等於門檻(10 / 1000):不觸發,要「超過」
+      - eval_time: 15m
+        alertname: High5xxRate
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'http_requests_total{status="200"}'
+        values: '0+970x20'
+      - series: 'http_requests_total{status="503"}'
+        values: '0+30x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: High5xxRate
+        exp_alerts:
+          - exp_labels: { severity: critical }
+            exp_annotations:
+              summary: 5xx 比例超過 1%

@@ -156,8 +156,11 @@ export const removeMember = (slug: string, userId: string) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}`, { method: 'DELETE' })
 
 /** 停用(離職):保留歷史紀錄;還有未來已確認的預約時後端會拒絕 */
-export const deactivateMember = (slug: string, userId: string) =>
-  call<void>(`/t/${enc(slug)}/members/${enc(userId)}/deactivate`, { method: 'POST' })
+export const deactivateMember = (slug: string, userId: string, reassignTo?: string) =>
+  call<void>(`/t/${enc(slug)}/members/${enc(userId)}/deactivate`, {
+    method: 'POST',
+    ...(reassignTo ? { body: JSON.stringify({ reassign_to: reassignTo }) } : {}),
+  })
 
 export const reactivateMember = (slug: string, userId: string) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}/reactivate`, { method: 'POST' })

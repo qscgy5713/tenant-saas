@@ -15,6 +15,7 @@ use super::AppState;
 use crate::{
     audit::{self, Actor},
     auth::AuthUser,
+    booking,
     db::{PG_FOREIGN_KEY_VIOLATION, PG_UNIQUE_VIOLATION, begin_scoped, pg_code},
     error::AppError,
     mail, outbox, plan,
@@ -394,15 +395,24 @@ async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct DeactivateBody {
+    /// 把未來已確認的預約改派給這位員工(整批,任何一筆排不進去就整個不停用)
+    reassign_to: Option<Uuid>,
+}
+
 /// 停用成員(離職):有預約紀錄的成員不能刪除,改成停用。
 /// 管理者可停用比自己低階的成員,成員也可以停用自己(退出);擁有者不行。
-/// 還有「未來已確認」的預約時不准停用 —— 顧客會撲空;請先取消(顧客會收到通知信)或請顧客改期。
+/// 還有「未來已確認」的預約時不准停用 —— 顧客會撲空;請先取消(顧客會收到通知信)或請顧客改期,
+/// 或帶 `reassign_to` 把它們整批改派給另一位員工(時間不變,顧客會收到通知信)。
 /// 待確認的預約不擋:它不佔時段,而且顧客確認時會重新檢查,員工已停用就會失敗。
 async fn deactivate_member(
     State(state): State<AppState>,
     ctx: TenantCtx,
     Path((_slug, user_id)): Path<(String, Uuid)>,
+    body: Option<Json<DeactivateBody>>,
 ) -> Result<StatusCode, AppError> {
+    let reassign_to = body.and_then(|Json(b)| b.reassign_to);
     let mut tx = ctx.begin(&state).await?;
     let row: Option<(Role, bool)> =
         sqlx::query_as("SELECT role, active FROM memberships WHERE user_id = $1 FOR UPDATE")
@@ -426,10 +436,14 @@ async fn deactivate_member(
     .bind(user_id)
     .fetch_one(&mut *tx)
     .await?;
+    let mut reassigned = 0;
     if upcoming > 0 {
-        return Err(AppError::Conflict(format!(
-            "此成員還有 {upcoming} 筆未來已確認的預約,請先取消(顧客會收到通知)或請顧客改期"
-        )));
+        let Some(new_staff) = reassign_to else {
+            return Err(AppError::Conflict(format!(
+                "此成員還有 {upcoming} 筆未來已確認的預約,請先取消(顧客會收到通知)、請顧客改期,或改派給其他員工"
+            )));
+        };
+        reassigned = reassign_upcoming(&mut tx, &ctx, user_id, new_staff).await?;
     }
     sqlx::query("UPDATE memberships SET active = false WHERE user_id = $1")
         .bind(user_id)
@@ -442,11 +456,83 @@ async fn deactivate_member(
         "member.deactivated",
         "member",
         Some(user_id),
-        json!({ "role": target, "self": user_id == ctx.user_id }),
+        json!({ "role": target, "self": user_id == ctx.user_id, "reassigned": reassigned }),
     )
     .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 把 `from` 未來已確認的預約全部改派給 `to`,回傳筆數。呼叫端已鎖住 `from` 的成員列。
+async fn reassign_upcoming(
+    tx: &mut crate::db::Tx,
+    ctx: &TenantCtx,
+    from: Uuid,
+    to: Uuid,
+) -> Result<usize, AppError> {
+    if to == from {
+        return Err(AppError::BadRequest("不能改派給要停用的人自己".into()));
+    }
+    // 對象必須是這家店仍在職的成員(RLS 已限定在這家店)
+    let target_name: Option<String> = sqlx::query_scalar(
+        "SELECT u.name FROM memberships m JOIN users u ON u.id = m.user_id
+         WHERE m.user_id = $1 AND m.active",
+    )
+    .bind(to)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let target_name =
+        target_name.ok_or_else(|| AppError::BadRequest("改派的對象不是這家店的在職成員".into()))?;
+
+    let tz = booking::tenant_timezone(tx, ctx.tenant_id).await?;
+    let rows: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, service_id, starts_at FROM bookings
+         WHERE staff_user_id = $1 AND status = 'confirmed' AND starts_at > now()
+         ORDER BY starts_at FOR UPDATE",
+    )
+    .bind(from)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (id, service_id, starts_at) in &rows {
+        let service = match booking::active_service(tx, *service_id).await {
+            Ok(s) => s,
+            Err(AppError::BadRequest(_)) => {
+                return Err(AppError::Conflict(format!(
+                    "{} 的預約所屬的服務已停用,無法改派,請先取消",
+                    mail::format_local(*starts_at, tz)
+                )));
+            }
+            Err(e) => return Err(e),
+        };
+        let old = booking::mail_ctx(tx, *id).await?;
+        booking::reassign_booking(tx, tz, *id, &service, to, *starts_at)
+            .await
+            .map_err(|e| match e {
+                AppError::Conflict(why) => {
+                    AppError::Conflict(format!("{} 的預約無法改派給 {target_name}:{why}", old.when))
+                }
+                other => other,
+            })?;
+        audit::record(
+            tx,
+            ctx.tenant_id,
+            Actor::User(ctx.user_id),
+            "booking.reassigned",
+            "booking",
+            Some(*id),
+            json!({ "from": from, "to": to }),
+        )
+        .await?;
+        let now = booking::mail_ctx(tx, *id).await?;
+        outbox::enqueue(
+            tx,
+            ctx.tenant_id,
+            &mail::staff_changed(&now.view(), &old.staff),
+            Some(&format!("staff_changed:{id}:{to}")),
+        )
+        .await?;
+    }
+    Ok(rows.len())
 }
 
 /// 重新啟用。要有名額(停用的成員不佔名額,所以回來時要重新檢查方案上限);

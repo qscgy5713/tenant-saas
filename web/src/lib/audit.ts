@@ -14,6 +14,7 @@ const ACTION_LABEL: Record<string, string> = {
   'member.removed': '移除成員',
   'member.left': '退出團隊',
   'member.deactivated': '停用成員',
+  'booking.reassigned': '改派預約',
   'member.reactivated': '重新啟用成員',
   'time_off.created': '新增休假',
   'time_off.deleted': '刪除休假',
@@ -34,6 +35,7 @@ const ACTION_LABEL: Record<string, string> = {
   'customer.listed': '瀏覽顧客清單',
   'customer.viewed': '查看顧客資料',
   'billing.payment_failed': '訂閱扣款失敗',
+  'billing.payment_recovered': '訂閱付款已恢復',
 }
 
 const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }

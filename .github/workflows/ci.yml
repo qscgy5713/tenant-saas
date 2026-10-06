@@ -156,3 +156,17 @@ jobs:
           push: false
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # 部署範例本身要能用:告警規則語法與行為、compose 檔能解析
+  deploy-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 告警規則(語法 + 行為)
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest check rules /d/alerts.yml
+          docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest test rules /d/alerts_test.yml
+      - name: docker-compose.prod.yml 能解析
+        run: |
+          mkdir -p deploy/secrets && echo ci-placeholder-token > deploy/secrets/metrics_token
+          docker compose -f deploy/docker-compose.prod.yml --env-file deploy/env.prod.example --profile migrate --profile monitoring config -q

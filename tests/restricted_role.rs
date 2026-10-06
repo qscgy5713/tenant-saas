@@ -408,6 +408,27 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         mail_of(&memory, &format!("owner-{unique}@example.com"), "扣款失敗").is_some(),
         "店主要收到付款失敗通知"
     );
+    let result: String = sqlx::query_scalar(
+        "SELECT billing_payment_recovered($1, 'invoice.paid', $2, 'in_1', $3, $4)",
+    )
+    .bind(format!("evt_paid_{unique}"))
+    .bind(format!("cus_{unique}"))
+    .bind("「{shop}」付款已恢復")
+    .bind("訂閱 {slug} 已恢復")
+    .fetch_one(&pool)
+    .await
+    .expect("付款恢復通知要能在受限帳號下寫入信件佇列");
+    assert_eq!(result, "applied");
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    assert!(
+        mail_of(
+            &memory,
+            &format!("owner-{unique}@example.com"),
+            "付款已恢復"
+        )
+        .is_some(),
+        "店主要收到付款恢復通知"
+    );
 
     // 3c. 匯出(CSV)與刪除顧客個資(outbox_forget_recipient 函式寫 email_outbox)
     let (status, _, body) = raw_get(

@@ -2,6 +2,20 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-06(告警規則 + 正式環境 compose)
+- `deploy/alerts.yml`(9 條)、`alerts_test.yml`(promtool 行為測試,改門檻會失敗)、`prometheus.yml`、`docker-compose.prod.yml`、`env.prod.example`;CI 新增 `deploy-config` 工作;`.gitignore` 排除 `deploy/.env.prod`、`deploy/secrets/`
+- 驗證:`promtool check/test rules` 通過(突變門檻 → 失敗);`docker compose config` 通過、缺必填變數會報錯。**`promtool check config` 在本機會因 `/run/secrets/metrics_token` 不存在而失敗**(容器內才有),所以 CI 只檢查規則檔
+- 沒做:在真實主機完整部署一次
+
+## 2026-10-06(停用員工時改派)
+- `booking::reassign_booking`、`mail::staff_changed`、停用端點的 `reassign_to`;前端停用視窗加「改派給」下拉;稽核標籤 `booking.reassigned`
+- 後端 4 個測試 + 前端 1 個;突變後端 6 個(5 抓到、1 存活:`FOR UPDATE`,見 decisions)、前端 3 個全抓到
+- 踩坑:測試輔助函式 `count(pool, sql: &str)` 會因 sqlx 要 `'static` 編譯失敗 → 改 `&'static str`;腳本用 `|` 分隔突變的新舊字串,遇到內容有 `||` 就壞了(第一次前端突變其實沒測到東西,重做)
+
+## 2026-10-06(付款恢復通知)
+- migration 0026、`invoice.paid` 解析與處理、`mail::payment_recovered`、3 個整合測試、稽核標籤;`restricted_role` 補呼叫 `billing_payment_recovered`
+- 踩坑:PL/pgSQL 不能 `SELECT t.*, x INTO rowtype_var, scalar` → 拆成兩個 SELECT;舊測試拿 `invoice.paid` 當「無關事件」,現在改用 `charge.succeeded`
+
 ## 2026-10-06(處理程式面待辦:取消通知附原因)
 - 後端:`cancel_reason`(驗證、只進信、稽核只記 `has_reason`);郵件範本多參數;前端:取消對話框的原因欄位(`ConfirmDialog` 多一個 `extra` 區塊)
 - 突變驗證 18 個(後端 12、前端 6),用 PID 等待 —— 這次流程是對的:啟動時記 PID、用 `kill -0` 等、結束後用特徵字串確認原始碼乾淨

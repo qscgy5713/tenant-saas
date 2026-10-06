@@ -1769,3 +1769,212 @@ async fn a_reason_for_an_unverified_or_past_booking_sends_nothing(pool: PgPool) 
             .unwrap();
     assert_eq!(any, 0);
 }
+
+// ---------- 停用時改派 ----------
+
+async fn deactivate_and_reassign(s: &Shop, user: Uuid, to: &str) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{user}/deactivate"),
+        Some(json!({ "reassign_to": to })),
+        Some(&s.owner),
+    )
+    .await
+}
+
+async fn staff_of(pool: &PgPool, id: &str) -> Uuid {
+    sqlx::query_scalar("SELECT staff_user_id FROM bookings WHERE id = $1::uuid")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn count(pool: &PgPool, sql: &'static str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+}
+
+#[sqlx::test]
+async fn deactivating_can_hand_the_upcoming_bookings_to_someone_else(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let t1 = at(day(3), 10, 0);
+    let t2 = at(day(4), 14, 0);
+    let (_, one) = book(&s.app, &s, Some(b_id), t1, "c@example.com").await;
+    let (_, two) = book(&s.app, &s, Some(b_id), t2, "d@example.com").await;
+    let (one, two) = (one["id"].as_str().unwrap(), two["id"].as_str().unwrap());
+    // 待確認的預約不在改派範圍
+    let (_, pending) = book(&s.app, &s, Some(b_id), at(day(5), 10, 0), "e@example.com").await;
+    let pending = pending["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = $1::uuid")
+        .bind(&pending)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, body) = deactivate_and_reassign(&s, b_id, &s.owner_id.to_string()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // 改派了,時間沒動
+    for (id, t) in [(one, t1), (two, t2)] {
+        assert_eq!(staff_of(&pool, id).await, s.owner_id);
+        let starts: DateTime<Utc> =
+            sqlx::query_scalar("SELECT starts_at FROM bookings WHERE id = $1::uuid")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(starts, t);
+    }
+    assert_eq!(staff_of(&pool, &pending).await, b_id);
+
+    // 顧客收到通知(寫明原人員與新人員),每筆一封
+    let (subject, body) = mail_body(&pool, &format!("staff_changed:{one}:{}", s.owner_id))
+        .await
+        .unwrap();
+    assert!(subject.contains("人員已變更"), "{subject}");
+    assert!(body.contains("原人員:小明"), "{body}");
+    assert!(
+        mail_body(&pool, &format!("staff_changed:{two}:{}", s.owner_id))
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM email_outbox WHERE dedupe_key LIKE 'staff_changed:%'"
+        )
+        .await,
+        2
+    );
+
+    // 稽核:每筆一條,停用那條記下改派筆數
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM audit_logs WHERE action = 'booking.reassigned'"
+        )
+        .await,
+        2
+    );
+    let reassigned: i64 = sqlx::query_scalar(
+        "SELECT (detail->>'reassigned')::bigint FROM audit_logs WHERE action = 'member.deactivated'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reassigned, 2);
+    let active: bool = sqlx::query_scalar("SELECT active FROM memberships WHERE user_id = $1")
+        .bind(b_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!active);
+}
+
+#[sqlx::test]
+async fn if_any_booking_cannot_move_nothing_changes(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, one) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let (_, two) = book(&s.app, &s, Some(b_id), at(day(4), 14, 0), "d@example.com").await;
+    // 第二筆的時段,owner 已經有預約
+    let (status, _) = book(
+        &s.app,
+        &s,
+        Some(s.owner_id),
+        at(day(4), 14, 30),
+        "e@example.com",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = deactivate_and_reassign(&s, b_id, &s.owner_id.to_string()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("無法改派"),
+        "{body}"
+    );
+
+    // 整批回滾:第一筆(排得進去的)也沒動、沒寄信、沒稽核、員工仍在職
+    assert_eq!(staff_of(&pool, one["id"].as_str().unwrap()).await, b_id);
+    assert_eq!(staff_of(&pool, two["id"].as_str().unwrap()).await, b_id);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM email_outbox WHERE dedupe_key LIKE 'staff_changed:%'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM audit_logs WHERE action IN ('booking.reassigned','member.deactivated')").await,
+        0
+    );
+    let active: bool = sqlx::query_scalar("SELECT active FROM memberships WHERE user_id = $1")
+        .bind(b_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(active);
+}
+
+#[sqlx::test]
+async fn reassign_targets_are_validated(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    // 改派給自己 / 不存在的人 / 已停用的人 → 400
+    assert_eq!(
+        deactivate_and_reassign(&s, b_id, &b_id.to_string()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        deactivate_and_reassign(&s, b_id, &Uuid::new_v4().to_string())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    signup(&s.app, "c@example.com").await;
+    let c_id = {
+        add_member(&pool, "shop-a", "c@example.com", "staff").await;
+        user_id(&pool, "c@example.com").await
+    };
+    // c 在職但不提供這個服務 → 409
+    let (status, body) = deactivate_and_reassign(&s, b_id, &c_id.to_string()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // c 被停用之後 → 400
+    assert_eq!(deactivate(&s, c_id).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        deactivate_and_reassign(&s, b_id, &c_id.to_string()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(staff_of(&pool, id).await, b_id);
+
+    // 不帶 reassign_to 仍是原本的 409
+    assert_eq!(deactivate(&s, b_id).await.0, StatusCode::CONFLICT);
+}
+
+#[sqlx::test]
+async fn a_staff_member_leaving_can_hand_over_their_own_bookings(pool: PgPool) {
+    // 員工自己退出也可以改派(自己的預約,對象是同店在職成員)
+    let s = shop(&pool).await;
+    let (b_token, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{b_id}/deactivate"),
+        Some(json!({ "reassign_to": s.owner_id })),
+        Some(&b_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        staff_of(&pool, created["id"].as_str().unwrap()).await,
+        s.owner_id
+    );
+}

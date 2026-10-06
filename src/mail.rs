@@ -200,6 +200,19 @@ pub fn rescheduled(m: &BookingMail, old_when: &str) -> Email {
     }
 }
 
+/// 改派通知:時間不變,負責的人員換了。`m.staff` 是新的人員
+pub fn staff_changed(m: &BookingMail, old_staff: &str) -> Email {
+    Email {
+        to: m.to.to_string(),
+        subject: format!("預約人員已變更:{}", m.shop),
+        body: format!(
+            "您好,\n\n店家已調整您預約的服務人員,時間不變:\n\n  店家:{}\n  服務:{}\n  原人員:{}\n  新人員:{}\n  時間:{}\n\n\
+             如果這樣不方便,請使用預約確認信中的連結改期或取消。\n",
+            m.shop, m.service, old_staff, m.staff, m.when
+        ),
+    }
+}
+
 /// 店家的公開預約頁(通知信裡的「重新預約」)
 pub fn shop_page_link(base_url: &str, slug: &str) -> String {
     format!("{}/s/{slug}", base(base_url))
@@ -322,6 +335,17 @@ pub fn payment_failed(
             "您好,\n\n「{{shop}}」的訂閱扣款失敗(金額 {amount},第 {attempt} 次嘗試)。\n\n\
              {outcome}\n\n\
              請盡快到下列頁面,從「管理付款」更新信用卡:\n\n  {plan_link}\n"
+        ),
+    )
+}
+
+/// 先前扣款失敗的發票付清了(標題與內文裡的 `{shop}` 由資料庫代入)
+pub fn payment_recovered(plan_link: &str) -> (String, String) {
+    (
+        "「{shop}」的訂閱付款已恢復".to_string(),
+        format!(
+            "您好,\n\n先前扣款失敗的款項已經付清,「{{shop}}」的訂閱恢復正常,方案沒有受到影響。\n\n\
+             如果想確認付款方式或發票,可以到:\n\n  {plan_link}\n"
         ),
     )
 }

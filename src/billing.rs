@@ -292,9 +292,19 @@ pub fn format_amount(amount: i64, currency: &str) -> String {
     }
 }
 
+/// 一張發票付清了(invoice.paid)
+#[derive(Debug, PartialEq)]
+pub struct PaymentPaid {
+    pub event_id: String,
+    pub kind: String,
+    pub customer: String,
+    pub invoice: String,
+}
+
 pub enum Parsed {
     Subscription(SubscriptionEvent),
     PaymentFailed(PaymentFailure),
+    PaymentPaid(PaymentPaid),
     /// 與方案無關的事件:收下並回 200,Stripe 才不會一直重送
     Ignored,
 }
@@ -331,6 +341,15 @@ pub fn parse_event(
                 .and_then(|n| i32::try_from(n).ok())
                 .unwrap_or(1),
             next_attempt: inv["next_payment_attempt"].as_i64(),
+        }));
+    }
+    if kind == "invoice.paid" {
+        let inv = &event["data"]["object"];
+        return Ok(Parsed::PaymentPaid(PaymentPaid {
+            event_id: text(&event["id"], "id")?,
+            kind: kind.to_string(),
+            customer: text(&inv["customer"], "customer")?,
+            invoice: text(&inv["id"], "invoice id")?,
         }));
     }
     if !SUBSCRIPTION_EVENTS.contains(&kind) {

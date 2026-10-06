@@ -1,0 +1,66 @@
+# 正式環境範例:應用程式 + 前端(nginx),資料庫請用外部的託管 PostgreSQL。
+# 先照 docs/deployment.md「第一次部署」佈建資料庫帳號,再:
+#   cp deploy/env.prod.example deploy/.env.prod   # 填好值;不要提交
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod --profile migrate run --rm migrate
+#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up -d
+# 要內建監控:加 --profile monitoring,並建立 deploy/secrets/metrics_token(內容 = METRICS_TOKEN)。
+name: tenant-saas
+
+services:
+  app:
+    build: { context: .. }
+    image: tenant-saas:${APP_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?runtime 帳號的連線字串}
+      JWT_SECRET: ${JWT_SECRET:?至少 32 字元}
+      SMTP_URL: ${SMTP_URL:?production 必填}
+      MAIL_FROM: ${MAIL_FROM:-預約系統 <noreply@localhost>}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?前端網址,例如 https://book.example.com}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # 前面有 web(nginx)附加 X-Forwarded-For,可以信任
+      TRUST_PROXY: "true"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO:-}
+      STRIPE_PRICE_BUSINESS: ${STRIPE_PRICE_BUSINESS:-}
+    # 不對外開放:只有同一個 compose 網路裡的 web 與 prometheus 連得到
+    expose: ["3001"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    build: { context: ../web }
+    image: tenant-saas-web:${APP_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      app: { condition: service_healthy }
+    environment:
+      API_UPSTREAM: http://app:3001
+    # TLS 由前面的負載平衡器 / Caddy 終止,這裡只綁本機
+    ports: ["127.0.0.1:8080:80"]
+
+  # 一次性:套用 migration。需要 migrator 帳號,runtime 帳號沒有建表權限
+  migrate:
+    profiles: [migrate]
+    image: tenant-saas:${APP_VERSION:-latest}
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?migrator 帳號的連線字串}
+      DATABASE_URL: ${DATABASE_URL:?}
+    command: ["migrate"]
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+    secrets: [metrics_token]
+    ports: ["127.0.0.1:9090:9090"]
+
+secrets:
+  metrics_token:
+    file: ./secrets/metrics_token

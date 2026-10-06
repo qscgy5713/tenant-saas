@@ -94,10 +94,12 @@ describe('describeDetail', () => {
       ),
     ).toBe('第 4 次嘗試失敗,不會再重試')
     expect(actionLabel('billing.payment_failed')).toBe('訂閱扣款失敗')
+    expect(actionLabel('billing.payment_recovered')).toBe('訂閱付款已恢復')
   })
 
   it('停用 / 重新啟用成員', () => {
     expect(actionLabel('member.deactivated')).toBe('停用成員')
+    expect(actionLabel('booking.reassigned')).toBe('改派預約')
     expect(actionLabel('member.reactivated')).toBe('重新啟用成員')
     expect(
       describeDetail(

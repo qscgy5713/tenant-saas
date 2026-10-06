@@ -1126,6 +1126,49 @@ describe('團隊', () => {
       expect(screen.queryByText('已停用')).not.toBeInTheDocument()
     })
 
+    it('停用時可選擇把未來預約改派給其他在職成員:選項不含自己,送出帶 reassign_to;不選則不帶', async () => {
+      mockShopMe('owner')
+      serve(() => [
+        ...roster(),
+        member({ user_id: 'u-gone', name: '已離職的人', role: 'staff', active: false }),
+      ])
+      const s = spy<{ reassign_to?: string }>()
+      server.use(
+        http.post(`${API}/t/demo-salon/members/u-staff/deactivate`, async ({ request }) => {
+          await s.record(request)
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      const open = async () => {
+        await user.click(
+          within((await screen.findByText('小安')).closest('li')!).getByRole('button', {
+            name: '停用',
+          }),
+        )
+        return screen.findByRole('dialog')
+      }
+
+      // 沒選:不帶 reassign_to
+      let dialog = await open()
+      const pick = within(dialog).getByRole('combobox', { name: /改派給/ })
+      const names = within(pick)
+        .getAllByRole('option')
+        .map((o) => o.textContent)
+      expect(names).toEqual(['不改派', '林美玲']) // 不含自己、不含已停用的人
+      await user.click(within(dialog).getByRole('button', { name: '停用' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body?.reassign_to).toBeUndefined()
+
+      // 選了:帶對象
+      dialog = await open()
+      await user.selectOptions(within(dialog).getByRole('combobox', { name: /改派給/ }), '林美玲')
+      await user.click(within(dialog).getByRole('button', { name: '停用' }))
+      await waitFor(() => expect(s.calls).toHaveLength(2))
+      expect(s.calls[1].body).toEqual({ reassign_to: 'u-owner' })
+    })
+
     it('重新啟用:送出後恢復;名額不足(402)時顯示原因', async () => {
       mockShopMe('owner')
       let active = false

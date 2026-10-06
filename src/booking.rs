@@ -438,6 +438,34 @@ pub async fn reschedule_booking(
     }
 }
 
+/// 改派:同一個服務、同一個時間,換一位員工負責。
+/// 新員工必須在那個時段真的有空(營業時間、休假、既有預約、整理時間、提供此服務都算在內)。
+pub async fn reassign_booking(
+    tx: &mut Tx,
+    tz: Tz,
+    booking_id: Uuid,
+    service: &ServiceInfo,
+    new_staff: Uuid,
+    start: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let free = staff_free_at(tx, tz, service, start, Some(new_staff), Some(booking_id)).await?;
+    if free.is_empty() {
+        return Err(AppError::Conflict("對方在該時段沒空或不提供此服務".into()));
+    }
+    let result = sqlx::query("UPDATE bookings SET staff_user_id = $2 WHERE id = $1")
+        .bind(booking_id)
+        .bind(new_staff)
+        .execute(&mut **tx)
+        .await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) if pg_code(&e).as_deref() == Some(PG_EXCLUSION_VIOLATION) => {
+            Err(AppError::Conflict("對方在該時段剛被預約走了".into()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// 寄信需要的預約資訊
 pub struct MailCtx {
     /// 顧客的 Email
