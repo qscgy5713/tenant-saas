@@ -1,9 +1,10 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
+import { ApiError } from '../../api/client'
 import { ErrorState, Loading } from '../../components/States'
 import { formatDateTime, formatDayLong, ymdInTz } from '../../lib/time'
-import { getCustomer, listCustomers } from '../api'
-import { Modal } from '../components/Modal'
+import { anonymizeCustomer, getCustomer, listCustomers } from '../api'
+import { ConfirmDialog, Modal } from '../components/Modal'
 import { STATUS_LABEL } from '../labels'
 import { useShop } from '../ShopContext'
 import type { Customer } from '../types'
@@ -87,7 +88,7 @@ export function CustomersPage() {
       )}
 
       <Modal open={!!openId} title="顧客資料" onClose={() => setOpenId(null)} size="lg">
-        {openId && <CustomerDetailView id={openId} />}
+        {openId && <CustomerDetailView id={openId} onErased={() => setOpenId(null)} />}
       </Modal>
     </div>
   )
@@ -130,8 +131,21 @@ function CustomerRow({
   )
 }
 
-function CustomerDetailView({ id }: { id: string }) {
-  const { slug, shop } = useShop()
+/** 匿名化後的顧客(後端把姓名換成這個)。清單與詳情仍會顯示,預約統計還在 */
+const ERASED_NAME = '已刪除的顧客'
+
+function CustomerDetailView({ id, onErased }: { id: string; onErased: () => void }) {
+  const { slug, shop, isOwner } = useShop()
+  const queryClient = useQueryClient()
+  const [asking, setAsking] = useState(false)
+  const erase = useMutation({
+    mutationFn: () => anonymizeCustomer(slug, id),
+    onSuccess: () => {
+      setAsking(false)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'customers', slug] })
+      onErased()
+    },
+  })
   const detail = useQuery({
     queryKey: ['admin', 'customers', slug, 'detail', id],
     queryFn: () => getCustomer(slug, id),
@@ -156,6 +170,37 @@ function CustomerDetailView({ id }: { id: string }) {
       <p className="muted small">
         共 {c.bookings} 次預約,完成 {c.completed} 次,未到 {c.no_shows} 次
       </p>
+      {isOwner && c.name !== ERASED_NAME && (
+        <div className="actions">
+          <button
+            type="button"
+            className="btn btn-danger-outline btn-sm"
+            onClick={() => setAsking(true)}
+          >
+            刪除顧客資料
+          </button>
+        </div>
+      )}
+      <ConfirmDialog
+        open={asking}
+        title="刪除這位顧客的資料?"
+        message={`${c.name} 的姓名、Email、電話會被永久抹除,預約上的備註也會清掉,還沒寄出的信會取消。預約紀錄本身會保留(統計用),但不再指向這個人。這個動作無法復原。`}
+        confirmLabel="永久刪除"
+        danger
+        pending={erase.isPending}
+        error={
+          erase.error instanceof ApiError
+            ? erase.error.message
+            : erase.error
+              ? '刪除失敗,請再試一次。'
+              : null
+        }
+        onConfirm={() => erase.mutate()}
+        onClose={() => {
+          setAsking(false)
+          erase.reset()
+        }}
+      />
       <h3>預約紀錄</h3>
       <ul className="rows">
         {c.history.map((h) => (

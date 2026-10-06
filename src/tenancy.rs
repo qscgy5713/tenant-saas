@@ -52,6 +52,14 @@ impl TenantCtx {
         }
     }
 
+    /// 只有擁有者(不可逆或影響整家店的操作)
+    pub fn require_owner(&self) -> Result<(), AppError> {
+        match self.role {
+            Role::Owner => Ok(()),
+            Role::Manager | Role::Staff => Err(AppError::Forbidden),
+        }
+    }
+
     /// owner / manager,或是操作自己的資料
     pub fn require_manager_or_self(&self, target: Uuid) -> Result<(), AppError> {
         if target == self.user_id {

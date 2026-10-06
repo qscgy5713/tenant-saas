@@ -6,7 +6,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{add_member, app, call, create_service, create_tenant, set_plan, signup, user_id};
+use common::{
+    add_member, app, call, create_service, create_tenant, parse_csv, raw_get, set_plan, signup,
+    user_id,
+};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::{
@@ -899,4 +902,283 @@ async fn remaining_actions_are_recorded(pool: PgPool) {
         done["items"][0]["detail"],
         json!({"from": "confirmed", "to": "completed", "notes_changed": false})
     );
+}
+
+// ---------- 匯出 CSV ----------
+
+async fn export(
+    app: &Router,
+    token: Option<&str>,
+    slug: &str,
+    query: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    raw_get(
+        app,
+        token,
+        &format!("/t/{slug}/audit-logs/export.csv{query}"),
+    )
+    .await
+}
+
+const COL_ACTOR_NAME: usize = 5;
+const COL_ACTION: usize = 6;
+const COL_DETAIL: usize = 9;
+
+#[sqlx::test]
+async fn export_is_a_safe_csv_that_round_trips(pool: PgPool) {
+    let s = shop(&pool).await;
+    // 操作者姓名是使用者自己填的:設成試算表公式 + 逗號 + 引號 + 換行,全部都不能出事
+    let evil = "=HYPERLINK(\"http://evil.example\",\"點我\"),\n第二行";
+    sqlx::query("UPDATE users SET name = $1 WHERE id = $2")
+        .bind(evil)
+        .bind(s.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 再做一個動作,讓這位操作者出現在稽核裡
+    call(
+        &s.app,
+        Method::POST,
+        "/t/shop-a/services",
+        Some(json!({"name": "染髮", "duration_minutes": 90, "price_cents": 100})),
+        Some(&s.owner),
+    )
+    .await;
+
+    let (status, headers, body) = export(&s.app, Some(&s.owner), "shop-a", "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["content-type"], "text/csv; charset=utf-8");
+    assert_eq!(headers["cache-control"], "no-store");
+    let disposition = headers["content-disposition"].to_str().unwrap();
+    assert!(
+        disposition.starts_with("attachment; filename=\"audit-shop-a-")
+            && disposition.ends_with(".csv\""),
+        "{disposition}"
+    );
+
+    let rows = parse_csv(&body);
+    assert_eq!(rows[0].len(), 10);
+    assert_eq!(rows[0][COL_ACTION], "動作");
+    assert!(
+        rows.iter().all(|r| r.len() == 10),
+        "每一列欄數一致(引號沒有弄亂欄位)"
+    );
+    let created = rows
+        .iter()
+        .find(|r| r[COL_ACTION] == "service.created")
+        .unwrap();
+
+    // 公式被加上單引號(試算表當成純文字),其餘內容原樣保留
+    assert_eq!(created[COL_ACTOR_NAME], format!("'{evil}"));
+    assert!(
+        !rows
+            .iter()
+            .flatten()
+            .any(|c| c.starts_with('=') || c.starts_with('+') || c.starts_with('@')),
+        "沒有任何欄位以公式字元開頭"
+    );
+    // 細節欄是合法的 JSON,來回無損
+    let detail: Value = serde_json::from_str(&created[COL_DETAIL]).unwrap();
+    assert!(detail.is_object());
+    // 時間欄:UTC 以 Z 結尾;當地時間是店家時區(台北 = UTC+8)
+    let utc: DateTime<Utc> = created[1].parse().unwrap();
+    assert!(created[1].ends_with('Z'));
+    let local = utc
+        .with_timezone(&Taipei)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    assert_eq!(created[2], local);
+    // 由舊到新
+    let ids: Vec<i64> = rows[1..].iter().map(|r| r[0].parse().unwrap()).collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]));
+}
+
+#[sqlx::test]
+async fn exporting_is_itself_audited_after_the_read_and_respects_filters(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, _, first) = export(&s.app, Some(&s.owner), "shop-a", "?action=service.").await;
+    let rows = parse_csv(&first);
+    assert!(
+        rows[1..]
+            .iter()
+            .all(|r| r[COL_ACTION].starts_with("service."))
+    );
+    assert!(rows.len() > 1);
+    assert!(
+        !rows.iter().any(|r| r[COL_ACTION] == "audit.exported"),
+        "匯出紀錄是在讀完之後才寫的,不會出現在自己的檔案裡"
+    );
+
+    // 稽核頁看得到:誰、什麼條件、幾筆
+    let (_, entries) = {
+        let (st, body) = call(
+            &s.app,
+            Method::GET,
+            "/t/shop-a/audit-logs?action=audit.",
+            None,
+            Some(&s.owner),
+        )
+        .await;
+        (st, body)
+    };
+    let items = entries["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{entries}");
+    assert_eq!(items[0]["action"], "audit.exported");
+    assert_eq!(items[0]["actor_user_id"], s.owner_id.to_string());
+    assert_eq!(items[0]["detail"]["rows"], rows.len() - 1);
+    assert_eq!(items[0]["detail"]["action"], "service.");
+
+    // 第二次匯出(不篩選)就看得到第一次的匯出紀錄
+    let (_, _, second) = export(&s.app, Some(&s.owner), "shop-a", "").await;
+    assert!(
+        parse_csv(&second)
+            .iter()
+            .any(|r| r[COL_ACTION] == "audit.exported")
+    );
+
+    // 時間範圍:未來的區間沒有資料,只有標題列
+    let from = (Utc::now() + Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (status, _, empty) =
+        export(&s.app, Some(&s.owner), "shop-a", &format!("?from={from}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_csv(&empty).len(), 1);
+}
+
+#[sqlx::test]
+async fn export_permissions_and_isolation(pool: PgPool) {
+    let s = shop(&pool).await;
+    let staff = signup(&s.app, "staff@example.com").await;
+    add_member(&pool, "shop-a", "staff@example.com", "staff").await;
+    let outsider = signup(&s.app, "outsider@example.com").await;
+
+    let status = |t: Option<&str>| {
+        let (app, t) = (s.app.clone(), t.map(str::to_string));
+        async move { export(&app, t.as_deref(), "shop-a", "").await.0 }
+    };
+    assert_eq!(status(Some(&staff)).await, StatusCode::FORBIDDEN);
+    assert_eq!(status(Some(&outsider)).await, StatusCode::NOT_FOUND);
+    assert_eq!(status(None).await, StatusCode::UNAUTHORIZED);
+    // 沒有權限的人不會留下「匯出過」的紀錄
+    assert!(
+        !actions(&s.app, &s.owner, "shop-a")
+            .await
+            .contains(&"audit.exported".to_string())
+    );
+
+    // 另一家店的匯出只有自己的紀錄
+    let other = signup(&s.app, "b@example.com").await;
+    create_tenant(&s.app, &other, "shop-b").await;
+    let (_, _, body) = export(&s.app, Some(&other), "shop-b", "").await;
+    let rows = parse_csv(&body);
+    assert!(rows.len() > 1);
+    let theirs: Vec<String> = rows[1..].iter().map(|r| r[8].clone()).collect();
+    let tenant_b: Uuid = sqlx::query_scalar("SELECT id FROM tenants WHERE slug = 'shop-b'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        theirs
+            .iter()
+            .all(|id| id.is_empty() || id == &tenant_b.to_string()),
+        "{theirs:?}"
+    );
+}
+
+async fn exported_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM audit_logs WHERE action = 'audit.exported'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// 邊界:剛好 50,000 筆可以匯出;多一筆就被拒絕,而且不會悄悄截斷。
+/// (用 SQL 直接數紀錄:`actions()` 只看最新 100 筆,灌了大量資料之後會是假資料,驗證不到東西。)
+#[sqlx::test]
+async fn the_row_limit_is_exact_and_a_refused_export_leaves_no_trace(pool: PgPool) {
+    // 刻意寫死:這是對外承諾的上限(文件與錯誤訊息都寫 50000),改動它應該讓測試提醒你
+    const EXPORT_MAX_ROWS: i64 = 50_000;
+    let s = shop(&pool).await;
+    let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO audit_logs (tenant_id, actor_type, action, entity_type)
+         SELECT $1, 'system', 'bulk.test', 'bulk' FROM generate_series(1, $2::int)",
+    )
+    .bind(s.tenant_id)
+    .bind(EXPORT_MAX_ROWS - existing)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_logs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, EXPORT_MAX_ROWS, "準備好:剛好在上限");
+
+    // 剛好 50,000 筆:成功,檔案有標題列 + 50,000 列
+    let (status, _, body) = export(&s.app, Some(&s.owner), "shop-a", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_csv(&body).len() as i64, EXPORT_MAX_ROWS + 1);
+    assert_eq!(exported_count(&pool).await, 1);
+
+    // 上一次匯出自己寫了一筆紀錄 → 現在是 50,001 筆:被拒絕,並且說明怎麼辦
+    let (status, _, body) = export(&s.app, Some(&s.owner), "shop-a", "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("50000") && body.contains("縮小"), "{body}");
+    assert_eq!(
+        exported_count(&pool).await,
+        1,
+        "被拒絕的匯出沒有帶走任何資料,不留「匯出過」的紀錄"
+    );
+
+    // 縮小範圍就可以
+    let (status, _, ok) = export(&s.app, Some(&s.owner), "shop-a", "?action=service.").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(parse_csv(&ok).len() > 1);
+}
+
+/// 時間範圍:`from` 含、`to` 不含。前端靠這個語意(「結束日當天也算」= 送隔天 00:00 當 `to`)。
+#[sqlx::test]
+async fn export_range_includes_from_and_excludes_to(pool: PgPool) {
+    let s = shop(&pool).await;
+    for (sec, tag) in [(0, "t0"), (1, "t1"), (2, "t2")] {
+        sqlx::query(
+            "INSERT INTO audit_logs (tenant_id, actor_type, action, entity_type, created_at)
+             VALUES ($1, 'system', $2, 'range', '2030-01-01T00:00:00Z'::timestamptz + make_interval(secs => $3))",
+        )
+        .bind(s.tenant_id)
+        .bind(format!("range.{tag}"))
+        .bind(f64::from(sec))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let in_range = |rows: Vec<Vec<String>>| -> Vec<String> {
+        rows[1..]
+            .iter()
+            .map(|r| r[COL_ACTION].clone())
+            .filter(|a| a.starts_with("range."))
+            .collect()
+    };
+    // [00:00:00, 00:00:02) → t0、t1;t2 剛好在 `to` 上,不含
+    let (status, _, body) = export(
+        &s.app,
+        Some(&s.owner),
+        "shop-a",
+        "?from=2030-01-01T00:00:00Z&to=2030-01-01T00:00:02Z",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(in_range(parse_csv(&body)), ["range.t0", "range.t1"]);
+    // 從 t1 開始:t0 不含在前面,t1 剛好在 `from` 上,含
+    let (_, _, body) = export(
+        &s.app,
+        Some(&s.owner),
+        "shop-a",
+        "?from=2030-01-01T00:00:01Z&to=2030-01-01T00:00:03Z",
+    )
+    .await;
+    assert_eq!(in_range(parse_csv(&body)), ["range.t1", "range.t2"]);
 }

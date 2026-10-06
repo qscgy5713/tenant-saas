@@ -1,4 +1,4 @@
-import { api, json } from '../api/client'
+import { api, apiDownload, json } from '../api/client'
 import type { Availability, BookingStatus, NewBooking, PublicBooking } from '../api/types'
 import type {
   AdminBooking,
@@ -211,6 +211,14 @@ export const listAudit = (
   q: { action?: string; before?: number; limit?: number } = {},
 ) => call<AuditPage>(`/t/${enc(slug)}/audit-logs${query({ ...q })}`)
 
+/** 匯出稽核日誌(CSV)。`from` / `to` 是 ISO 時間(含 from、不含 to) */
+export const exportAudit = (slug: string, q: { action?: string; from?: string; to?: string }) =>
+  apiDownload(`/t/${enc(slug)}/audit-logs/export.csv${query({ ...q })}`)
+
+/** 匯出預約(CSV,管理者以上)。`from` / `to` 是 ISO 時間 */
+export const exportBookings = (slug: string, q: { from?: string; to?: string }) =>
+  apiDownload(`/t/${enc(slug)}/bookings/export.csv${query({ ...q })}`)
+
 export const getPlan = (slug: string) =>
   call<{ plan: PlanInfo; usage: PlanUsage }>(`/t/${enc(slug)}/plan`)
 
@@ -220,6 +228,10 @@ export const listCustomers = (slug: string, q: { q?: string; limit?: number; off
 
 export const getCustomer = (slug: string, id: string) =>
   call<CustomerDetail>(`/t/${enc(slug)}/customers/${enc(id)}`)
+
+/** 刪除顧客個資(匿名化;不可還原,僅擁有者)。還有未來 / 待確認的預約時後端會拒絕 */
+export const anonymizeCustomer = (slug: string, id: string) =>
+  call<void>(`/t/${enc(slug)}/customers/${enc(id)}/anonymize`, { method: 'POST' })
 
 export const getBilling = (slug: string) => call<Billing>(`/t/${enc(slug)}/billing`)
 

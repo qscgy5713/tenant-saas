@@ -116,6 +116,34 @@ describe('describeDetail', () => {
     ).toContain('管理者')
   })
 
+  it('匯出與查看顧客資料:標籤與細節(不含任何個資欄位)', () => {
+    expect(actionLabel('audit.exported')).toBe('匯出稽核日誌')
+    expect(actionLabel('customer.viewed')).toBe('查看顧客資料')
+    expect(actionLabel('customer.listed')).toBe('瀏覽顧客清單')
+    expect(describeDetail(entry({ action: 'audit.exported', detail: { rows: 120 } }), tz)).toBe(
+      '共 120 筆',
+    )
+    expect(
+      describeDetail(
+        entry({ action: 'customer.listed', detail: { count: 3, offset: 0, searched: true } }),
+        tz,
+      ),
+    ).toBe('搜尋,看到 3 位顧客')
+    expect(
+      describeDetail(
+        entry({ action: 'customer.listed', detail: { count: 50, offset: 0, searched: false } }),
+        tz,
+      ),
+    ).toBe('瀏覽,看到 50 位顧客')
+    expect(describeDetail(entry({ action: 'customer.viewed', detail: { history: 7 } }), tz)).toBe(
+      '看了 7 筆預約紀錄',
+    )
+    for (const action of ['audit.exported', 'customer.listed', 'customer.viewed']) {
+      expect(() => describeDetail(entry({ action, detail: {} }), tz)).not.toThrow()
+      expect(describeDetail(entry({ action, detail: {} }), tz)).toBeNull()
+    }
+  })
+
   it('改期顯示店家時區的前後時間', () => {
     const e = entry({
       action: 'booking.rescheduled',

@@ -7,8 +7,12 @@ import { renderApp } from '../test/render'
 import { API, error, server, standardSlots, taipei } from '../test/server'
 import { SHOP, USER, loginAs, mockShopMe, preloadAdmin, spy } from '../test/admin'
 import * as redirect from '../lib/redirect'
+import { saveFile } from '../lib/download'
 import { canDeactivate, canEditSchedule, canReactivate, canRemove } from './permissions'
 import type { AdminBooking, AdminService, Member } from './types'
+
+// 下載檔案:jsdom 沒有 URL.createObjectURL,而且測試只需要知道「存了什麼檔」
+vi.mock('../lib/download', () => ({ saveFile: vi.fn() }))
 
 beforeAll(preloadAdmin)
 beforeEach(() => {
@@ -1286,6 +1290,95 @@ describe('顧客頁', () => {
     ...over,
   })
 
+  describe('刪除顧客資料', () => {
+    const history = [
+      {
+        id: 'h1',
+        status: 'completed',
+        starts_at: taipei('2026-09-20', '10:00'),
+        ends_at: taipei('2026-09-20', '11:00'),
+        notes: null,
+        service_name: '剪髮',
+        staff_name: '林美玲',
+      },
+    ]
+    const serve = (name = '王小明') => {
+      let erased = false
+      server.use(
+        http.get(`${API}/t/demo-salon/customers`, () =>
+          HttpResponse.json({
+            items: [customer({ name: erased ? '已刪除的顧客' : name })],
+            limit: 30,
+            offset: 0,
+          }),
+        ),
+        http.get(`${API}/t/demo-salon/customers/c1`, () =>
+          HttpResponse.json({ ...customer({ name: erased ? '已刪除的顧客' : name }), history }),
+        ),
+      )
+      return () => (erased = true)
+    }
+    const open = async (role: 'owner' | 'manager') => {
+      mockShopMe(role)
+      renderApp('/admin/demo-salon/customers')
+      const user = userEvent.setup()
+      await user.click(await screen.findByRole('button', { name: /王小明|已刪除的顧客/ }))
+      return { user, dialog: await screen.findByRole('dialog') }
+    }
+
+    it('只有擁有者看得到「刪除顧客資料」;管理者沒有', async () => {
+      serve()
+      const { dialog } = await open('manager')
+      await within(dialog).findByText('預約紀錄')
+      expect(within(dialog).queryByRole('button', { name: '刪除顧客資料' })).not.toBeInTheDocument()
+    })
+
+    it('先說明後果(不可復原),確認後送出,清單重新載入、視窗關閉', async () => {
+      const markErased = serve()
+      const s = spy()
+      server.use(
+        http.post(`${API}/t/demo-salon/customers/c1/anonymize`, async ({ request }) => {
+          await s.record(request)
+          markErased()
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      const { user, dialog } = await open('owner')
+      await user.click(await within(dialog).findByRole('button', { name: '刪除顧客資料' }))
+      const confirm = (await screen.findAllByRole('dialog')).at(-1)!
+      expect(within(confirm).getByText(/無法復原/)).toBeInTheDocument()
+      expect(within(confirm).getByText(/預約紀錄本身會保留/)).toBeInTheDocument()
+      expect(s.calls).toHaveLength(0) // 還沒確認不能送出
+      await user.click(within(confirm).getByRole('button', { name: '永久刪除' }))
+
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(await screen.findByRole('button', { name: '已刪除的顧客' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '王小明' })).not.toBeInTheDocument()
+    })
+
+    it('還有未來的預約 → 後端拒絕,原因顯示在確認視窗,資料沒動', async () => {
+      serve()
+      server.use(
+        http.post(`${API}/t/demo-salon/customers/c1/anonymize`, () =>
+          error(409, '這位顧客還有 1 筆未來或待確認的預約,請先取消再刪除資料'),
+        ),
+      )
+      const { user, dialog } = await open('owner')
+      await user.click(await within(dialog).findByRole('button', { name: '刪除顧客資料' }))
+      const confirm = (await screen.findAllByRole('dialog')).at(-1)!
+      await user.click(within(confirm).getByRole('button', { name: '永久刪除' }))
+      expect(await within(confirm).findByRole('alert')).toHaveTextContent('還有 1 筆未來')
+      expect(confirm).toHaveAttribute('open')
+    })
+
+    it('已經刪除過的顧客不再顯示刪除按鈕', async () => {
+      serve('已刪除的顧客')
+      const { dialog } = await open('owner')
+      await within(dialog).findByText('預約紀錄')
+      expect(within(dialog).queryByRole('button', { name: '刪除顧客資料' })).not.toBeInTheDocument()
+    })
+  })
+
   it('員工看不到;管理者看到清單、未到標記與下次預約', async () => {
     mockShopMe('staff')
     renderApp('/admin/demo-salon/customers')
@@ -1730,6 +1823,187 @@ describe('方案與稽核頁', () => {
     expect(await screen.findByText('新增服務')).toBeInTheDocument()
     expect(calls).toEqual([null, '2'])
     expect(screen.queryByRole('button', { name: '載入更多' })).not.toBeInTheDocument()
+  })
+})
+
+describe('匯出預約', () => {
+  beforeEach(() => vi.mocked(saveFile).mockClear())
+  const URL_ = `${API}/t/demo-salon/bookings/export.csv`
+  const csv = () =>
+    new HttpResponse('\ufeff預約編號\r\n', {
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': 'attachment; filename="bookings-demo-salon-20261005.csv"',
+      },
+    })
+
+  it('員工沒有「匯出 CSV」(不能一次帶走全店的顧客資料);管理者有', async () => {
+    mockShopMe('staff')
+    mockBookings([])
+    const { unmount } = renderApp('/admin/demo-salon/bookings')
+    await screen.findByRole('button', { name: /新增預約/ })
+    expect(screen.queryByRole('button', { name: '匯出 CSV' })).not.toBeInTheDocument()
+    unmount()
+
+    mockShopMe('manager')
+    renderApp('/admin/demo-salon/bookings')
+    expect(await screen.findByRole('button', { name: '匯出 CSV' })).toBeInTheDocument()
+  })
+
+  it('送出日期範圍(店家時區的整天)→ 存檔;視窗提醒內含個資', async () => {
+    mockShopMe('owner')
+    mockBookings([])
+    const s = spy()
+    server.use(
+      http.get(URL_, async ({ request }) => {
+        await s.record(request)
+        return csv()
+      }),
+    )
+    renderApp('/admin/demo-salon/bookings')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '匯出 CSV' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/姓名、Email 與電話/)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByText(/已匯出/)).toBeInTheDocument()
+
+    const q = s.calls[0].url.searchParams
+    expect(q.get('from')).toBe('2026-09-05T16:00:00.000Z')
+    expect(q.get('to')).toBe('2026-10-05T16:00:00.000Z')
+    expect(vi.mocked(saveFile).mock.calls[0][1]).toBe('bookings-demo-salon-20261005.csv')
+  })
+
+  it('筆數超過上限 → 顯示後端的說明,不存檔', async () => {
+    mockShopMe('owner')
+    mockBookings([])
+    server.use(
+      http.get(URL_, () => error(400, '符合條件的預約超過 50000 筆,請縮小日期範圍後再匯出')),
+    )
+    renderApp('/admin/demo-salon/bookings')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '匯出 CSV' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('超過 50000 筆')
+    expect(saveFile).not.toHaveBeenCalled()
+  })
+})
+
+describe('稽核日誌匯出', () => {
+  let listCalls = 0
+  beforeEach(() => {
+    mockShopMe('owner')
+    vi.mocked(saveFile).mockClear()
+    listCalls = 0
+    server.use(
+      http.get(`${API}/t/demo-salon/audit-logs`, () => {
+        listCalls += 1
+        return HttpResponse.json({ items: [], next_before: null })
+      }),
+    )
+  })
+  const EXPORT_URL = `${API}/t/demo-salon/audit-logs/export.csv`
+  const csv = (name = 'audit-demo-salon-20261005.csv') =>
+    new HttpResponse('\ufeffid\r\n1\r\n', {
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="${name}"`,
+      },
+    })
+
+  async function openDialog(path = '/admin/demo-salon/audit') {
+    renderApp(path)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '匯出 CSV' }))
+    return { user, dialog: await screen.findByRole('dialog') }
+  }
+
+  it('預設匯出最近 30 天(店家時區的整天,含起訖兩天);下載的檔名取自後端', async () => {
+    const s = spy()
+    server.use(
+      http.get(EXPORT_URL, async ({ request }) => {
+        await s.record(request)
+        return csv('audit-demo-salon-20261005.csv')
+      }),
+    )
+    const { user, dialog } = await openDialog()
+    expect(within(dialog).getByLabelText('開始日期')).toHaveValue('2026-09-06')
+    expect(within(dialog).getByLabelText('結束日期')).toHaveValue('2026-10-05')
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+
+    expect(await within(dialog).findByText(/已匯出/)).toBeInTheDocument()
+    // 匯出本身會留一筆稽核紀錄:列表要重新載入,使用者才看得到剛剛那筆
+    expect(listCalls).toBeGreaterThan(1)
+    const q = s.calls[0].url.searchParams
+    expect(q.get('from')).toBe('2026-09-05T16:00:00.000Z') // 9/6 00:00(台北)
+    expect(q.get('to')).toBe('2026-10-05T16:00:00.000Z') // 10/6 00:00 → 10/5 整天都算
+    expect(q.get('action')).toBeNull()
+    expect(saveFile).toHaveBeenCalledTimes(1)
+    const [blob, filename] = vi.mocked(saveFile).mock.calls[0]
+    expect(filename).toBe('audit-demo-salon-20261005.csv')
+    expect(await (blob as Blob).text()).toContain('id')
+  })
+
+  it('沿用目前的類別篩選,而且在視窗裡告訴使用者', async () => {
+    const s = spy()
+    server.use(
+      http.get(EXPORT_URL, async ({ request }) => {
+        await s.record(request)
+        return csv()
+      }),
+    )
+    renderApp('/admin/demo-salon/audit')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '預約' }))
+    await user.click(screen.getByRole('button', { name: '匯出 CSV' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('預約')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    await within(dialog).findByText(/已匯出/)
+    expect(s.calls[0].url.searchParams.get('action')).toBe('booking.')
+  })
+
+  it('筆數超過上限 → 顯示後端的說明,不下載任何東西,改完日期可以再試', async () => {
+    let attempts = 0
+    server.use(
+      http.get(EXPORT_URL, () =>
+        ++attempts === 1 ? error(400, '符合條件的紀錄超過 50000 筆,請縮小日期範圍後再匯出') : csv(),
+      ),
+    )
+    const { user, dialog } = await openDialog()
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('超過 50000 筆')
+    expect(saveFile).not.toHaveBeenCalled()
+    expect(dialog).toHaveAttribute('open')
+
+    await user.clear(within(dialog).getByLabelText('開始日期'))
+    await user.type(within(dialog).getByLabelText('開始日期'), '2026-10-01')
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByText(/已匯出/)).toBeInTheDocument()
+    expect(saveFile).toHaveBeenCalledTimes(1)
+  })
+
+  it('日期沒填 / 結束早於開始 → 前端先擋,不打 API', async () => {
+    let hits = 0
+    server.use(http.get(EXPORT_URL, () => ((hits += 1), csv())))
+    const { user, dialog } = await openDialog()
+    await user.clear(within(dialog).getByLabelText('結束日期'))
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('請選擇日期範圍')
+
+    await user.type(within(dialog).getByLabelText('結束日期'), '2026-08-01')
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('結束日期不能早於開始日期')
+    expect(hits).toBe(0)
+  })
+
+  it('連不上伺服器 → 顯示錯誤,不會存出一個壞檔', async () => {
+    server.use(http.get(EXPORT_URL, () => HttpResponse.error()))
+    const { user, dialog } = await openDialog()
+    await user.click(within(dialog).getByRole('button', { name: '匯出' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('無法連線')
+    expect(saveFile).not.toHaveBeenCalled()
   })
 })
 

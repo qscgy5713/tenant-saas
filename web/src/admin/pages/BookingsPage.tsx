@@ -10,8 +10,10 @@ import { NewBookingModal } from '../components/NewBookingModal'
 import { MonthCalendar } from '../components/MonthCalendar'
 import { MoveConfirm, type Move } from '../components/MoveConfirm'
 import { WeekCalendar } from '../components/WeekCalendar'
+import { ExportDialog } from '../components/ExportDialog'
 import { Modal } from '../components/Modal'
 import { addMonths, monthWeeks, weekDays } from '../../lib/calendar'
+import { exportBookings } from '../api'
 import { bookingsKey, useAllBookings, useBookings, useMembers } from '../queries'
 import { useShop } from '../ShopContext'
 
@@ -46,6 +48,7 @@ export function BookingsPage() {
   const queryClient = useQueryClient()
   const [params, setParams] = useSearchParams()
   const [creating, setCreating] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [pickedId, setPickedId] = useState<string | null>(null)
   const [move, setMove] = useState<Move | null>(null)
@@ -104,6 +107,11 @@ export function BookingsPage() {
           <p className="muted small">時間皆為店家當地時間</p>
         </div>
         <div className="page-actions">
+          {canManage && (
+            <button type="button" className="btn btn-secondary" onClick={() => setExporting(true)}>
+              匯出 CSV
+            </button>
+          )}
           <button type="button" className="btn btn-primary" onClick={() => setCreating(true)}>
             <PlusIcon width={16} height={16} />
             新增預約
@@ -263,6 +271,21 @@ export function BookingsPage() {
         onClose={() => setMove(null)}
         onDone={setFlash}
       />
+      <ExportDialog
+        open={exporting}
+        onClose={() => setExporting(false)}
+        title="匯出預約"
+        description={
+          <>
+            匯出與這段期間有重疊的所有預約(含已取消),CSV 可用 Excel 開啟。
+            <strong>檔案內含顧客的姓名、Email 與電話</strong>
+            ,請妥善保管。一次最多 50,000 筆。匯出本身會被記錄。
+          </>
+        }
+        successNote="已匯出,檔案正在下載。這次匯出已記錄在稽核日誌裡。"
+        run={(range) => exportBookings(slug, range)}
+      />
+
       <NewBookingModal
         open={creating}
         onClose={() => setCreating(false)}

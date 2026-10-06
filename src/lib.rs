@@ -4,6 +4,7 @@ pub mod availability;
 pub mod billing;
 pub mod booking;
 pub mod config;
+pub mod csv;
 pub mod db;
 pub mod dbrole;
 pub mod error;

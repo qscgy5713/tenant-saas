@@ -3,7 +3,8 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderName, StatusCode, header},
+    response::IntoResponse,
     routing::{get, patch, post},
 };
 use chrono::{DateTime, Utc};
@@ -20,6 +21,7 @@ use super::{
 use crate::{
     audit::{self, Actor},
     booking::{self, BookingStatus, NewBooking},
+    csv::{self, EXPORT_MAX_ROWS},
     error::AppError,
     mail, outbox,
     tenancy::{Role, TenantCtx},
@@ -28,6 +30,7 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/t/{slug}/bookings", get(list).post(create))
+        .route("/t/{slug}/bookings/export.csv", get(export))
         .route("/t/{slug}/bookings/{id}", patch(update))
         .route("/t/{slug}/bookings/{id}/availability", get(availability))
         .route("/t/{slug}/bookings/{id}/reschedule", post(reschedule))
@@ -440,4 +443,140 @@ async fn reschedule(
         starts_at: req.start,
         ends_at,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportQuery {
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    status: Option<BookingStatus>,
+    staff_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct ExportRow {
+    id: Uuid,
+    status: BookingStatus,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    starts_local: String,
+    ends_local: String,
+    service_name: String,
+    staff_name: String,
+    customer_name: String,
+    customer_email: String,
+    customer_phone: Option<String>,
+    notes: Option<String>,
+}
+
+const EXPORT_HEADER: [&str; 12] = [
+    "預約編號",
+    "狀態",
+    "開始(UTC)",
+    "開始(店家當地)",
+    "結束(UTC)",
+    "結束(店家當地)",
+    "服務",
+    "服務人員",
+    "顧客姓名",
+    "顧客 Email",
+    "顧客電話",
+    "備註",
+];
+
+fn status_label(status: BookingStatus) -> &'static str {
+    match status {
+        BookingStatus::Pending => "待確認",
+        BookingStatus::Confirmed => "已確認",
+        BookingStatus::Completed => "已完成",
+        BookingStatus::NoShow => "未到",
+        BookingStatus::Cancelled => "已取消",
+    }
+}
+
+/// 匯出預約(CSV,僅管理者以上;員工不能一次帶走全店的顧客資料)。
+///
+/// 內含顧客的姓名 / Email / 電話與備註,所以:套用與稽核匯出相同的公式注入防護、
+/// 超過上限就拒絕(不截斷)、匯出本身留一筆 `booking.exported`(誰、條件、幾筆;不含任何個資)。
+/// 篩選的語意與列表相同:`from` / `to` 是「與這段時間有重疊的預約」。
+async fn export(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path(slug): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    ctx.require_manager()?;
+    let mut tx = ctx.begin(&state).await?;
+    let rows = sqlx::query_as::<_, ExportRow>(
+        "SELECT b.id, b.status, b.starts_at, b.ends_at,
+                to_char(b.starts_at AT TIME ZONE t.timezone, 'YYYY-MM-DD HH24:MI') AS starts_local,
+                to_char(b.ends_at AT TIME ZONE t.timezone, 'YYYY-MM-DD HH24:MI') AS ends_local,
+                s.name AS service_name, u.name AS staff_name,
+                c.name AS customer_name, c.email::text AS customer_email, c.phone AS customer_phone,
+                b.notes
+         FROM bookings b
+         JOIN tenants t ON t.id = b.tenant_id
+         JOIN services s ON s.id = b.service_id
+         JOIN users u ON u.id = b.staff_user_id
+         JOIN customers c ON c.id = b.customer_id
+         WHERE ($1::timestamptz IS NULL OR b.ends_at > $1)
+           AND ($2::timestamptz IS NULL OR b.starts_at < $2)
+           AND ($3::booking_status IS NULL OR b.status = $3)
+           AND ($4::uuid IS NULL OR b.staff_user_id = $4)
+         ORDER BY b.starts_at, b.id LIMIT $5",
+    )
+    .bind(q.from)
+    .bind(q.to)
+    .bind(q.status)
+    .bind(q.staff_id)
+    .bind(EXPORT_MAX_ROWS + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.len() as i64 > EXPORT_MAX_ROWS {
+        return Err(AppError::BadRequest(format!(
+            "符合條件的預約超過 {EXPORT_MAX_ROWS} 筆,請縮小日期範圍後再匯出"
+        )));
+    }
+
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "booking.exported",
+        "booking",
+        None,
+        json!({ "rows": rows.len(), "status": q.status, "from": q.from, "to": q.to }),
+    )
+    .await?;
+    tx.commit().await?;
+
+    let mut body = String::from(csv::BOM);
+    body.push_str(&csv::row(EXPORT_HEADER));
+    for r in &rows {
+        body.push_str(&csv::row([
+            r.id.to_string(),
+            status_label(r.status).to_string(),
+            r.starts_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            r.starts_local.clone(),
+            r.ends_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            r.ends_local.clone(),
+            r.service_name.clone(),
+            r.staff_name.clone(),
+            r.customer_name.clone(),
+            r.customer_email.clone(),
+            r.customer_phone.clone().unwrap_or_default(),
+            r.notes.clone().unwrap_or_default(),
+        ]));
+    }
+    let filename = format!("bookings-{slug}-{}.csv", Utc::now().format("%Y%m%d"));
+    let headers: [(HeaderName, String); 3] = [
+        (header::CONTENT_TYPE, "text/csv; charset=utf-8".into()),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        ),
+        (header::CACHE_CONTROL, "no-store".into()),
+    ];
+    Ok((StatusCode::OK, headers, body))
 }

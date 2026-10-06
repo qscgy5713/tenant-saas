@@ -13,7 +13,7 @@ mod common;
 use axum::http::{Method, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{app, call, create_service, create_tenant, signup};
+use common::{app, call, create_service, create_tenant, parse_csv, raw_get, signup};
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tenant_saas::{
@@ -407,6 +407,73 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
     assert!(
         mail_of(&memory, &format!("owner-{unique}@example.com"), "扣款失敗").is_some(),
         "店主要收到付款失敗通知"
+    );
+
+    // 3c. 匯出(CSV)與刪除顧客個資(outbox_forget_recipient 函式寫 email_outbox)
+    let (status, _, body) = raw_get(
+        &app,
+        Some(&owner),
+        &format!("/t/{slug}/audit-logs/export.csv"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "稽核匯出要能在受限帳號下運作: {body}"
+    );
+    assert!(parse_csv(&body).len() > 1);
+    let (status, _, body) = raw_get(
+        &app,
+        Some(&owner),
+        &format!("/t/{slug}/bookings/export.csv"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "預約匯出要能在受限帳號下運作: {body}"
+    );
+    assert!(
+        parse_csv(&body)
+            .iter()
+            .any(|r| r.iter().any(|c| c == &customer))
+    );
+
+    // 前面那位顧客預約過又取消了 → 沒有未來的預約,可以刪除個資
+    let customer_row: Uuid = {
+        let mut tx = tenant_saas::db::begin_scoped(&pool, Some(owner_uuid(&me)), Some(tenant_id))
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar("SELECT id FROM customers WHERE email = $1::citext")
+            .bind(&customer)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        id
+    };
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        &format!("/t/{slug}/customers/{customer_row}/anonymize"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "刪除顧客個資要能在受限帳號下運作: {body}"
+    );
+    let (_, _, body) = raw_get(
+        &app,
+        Some(&owner),
+        &format!("/t/{slug}/bookings/export.csv"),
+    )
+    .await;
+    assert!(
+        !body.contains(&customer),
+        "匯出裡不該再有被刪除顧客的 Email"
     );
 
     // 4. 隔離在受限帳號下仍然成立:別家店的人看不到這家店

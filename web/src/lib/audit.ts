@@ -30,6 +30,9 @@ const ACTION_LABEL: Record<string, string> = {
   'booking.notes_updated': '更新預約備註',
   'billing.checkout_started': '開始線上訂閱',
   'billing.plan_changed': '方案變更',
+  'audit.exported': '匯出稽核日誌',
+  'customer.listed': '瀏覽顧客清單',
+  'customer.viewed': '查看顧客資料',
   'billing.payment_failed': '訂閱扣款失敗',
 }
 
@@ -114,6 +117,14 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
       return str(d.starts_at) ? `預約時間:${formatDateTime(str(d.starts_at)!, timeZone)}` : null
     case 'billing.checkout_started':
       return str(d.plan) ? `選擇方案:${PLAN_NAME[str(d.plan)!] ?? str(d.plan)}` : null
+    case 'audit.exported':
+      return num(d.rows) !== null ? `共 ${num(d.rows)} 筆` : null
+    case 'customer.listed':
+      return num(d.count) !== null
+        ? `${d.searched === true ? '搜尋' : '瀏覽'},看到 ${num(d.count)} 位顧客`
+        : null
+    case 'customer.viewed':
+      return num(d.history) !== null ? `看了 ${num(d.history)} 筆預約紀錄` : null
     case 'billing.payment_failed':
       return num(d.attempt) === null
         ? null
@@ -154,4 +165,6 @@ export const AUDIT_FILTERS: { value: string; label: string }[] = [
   { value: 'invitation.', label: '邀請' },
   { value: 'time_off.', label: '休假' },
   { value: 'billing.', label: '付款' },
+  { value: 'customer.', label: '顧客資料' },
+  { value: 'audit.', label: '匯出' },
 ]

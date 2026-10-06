@@ -160,3 +160,56 @@ pub fn app_with_auth_limit(pool: PgPool, limit: u32) -> Router {
     };
     routes::router(AppState::new(pool, &config))
 }
+
+/// 最小的 RFC 4180 解析器(測試用):把匯出的檔案還原成列與欄,
+/// 才能驗證「引號、逗號、換行」真的來回無損,而不是只比對字串長相
+pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let text = text
+        .strip_prefix('\u{feff}')
+        .expect("要有 BOM(Excel 才不會把中文當亂碼)");
+    let (mut rows, mut row, mut cell) = (Vec::new(), Vec::new(), String::new());
+    let (mut quoted, mut chars) = (false, text.chars().peekable());
+    while let Some(c) = chars.next() {
+        match (quoted, c) {
+            (true, '"') if chars.peek() == Some(&'"') => {
+                chars.next();
+                cell.push('"');
+            }
+            (true, '"') => quoted = false,
+            (true, c) => cell.push(c),
+            (false, '"') => quoted = true,
+            (false, ',') => row.push(std::mem::take(&mut cell)),
+            (false, '\r') if chars.peek() == Some(&'\n') => {
+                chars.next();
+                row.push(std::mem::take(&mut cell));
+                rows.push(std::mem::take(&mut row));
+            }
+            (false, c) => cell.push(c),
+        }
+    }
+    assert!(
+        !quoted && cell.is_empty() && row.is_empty(),
+        "檔案要以 CRLF 結尾、引號要成對"
+    );
+    rows
+}
+
+/// GET 並回傳原始內容(非 JSON 的回應,例如 CSV)
+pub async fn raw_get(
+    app: &Router,
+    token: Option<&str>,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let mut req = Request::builder().method(Method::GET).uri(uri);
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let res = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (status, headers) = (res.status(), res.headers().clone());
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}

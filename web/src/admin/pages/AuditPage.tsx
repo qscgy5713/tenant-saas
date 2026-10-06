@@ -1,9 +1,10 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { ErrorState, Loading } from '../../components/States'
 import { AUDIT_FILTERS, actionLabel, actorLabel, describeDetail } from '../../lib/audit'
 import { formatDateTime } from '../../lib/time'
-import { listAudit } from '../api'
+import { exportAudit, listAudit } from '../api'
+import { ExportDialog } from '../components/ExportDialog'
 import { useShop } from '../ShopContext'
 
 const PAGE_SIZE = 30
@@ -12,6 +13,9 @@ const PAGE_SIZE = 30
 export function AuditPage() {
   const { slug, shop } = useShop()
   const [filter, setFilter] = useState('')
+  const [exporting, setExporting] = useState(false)
+  const queryClient = useQueryClient()
+  const filterLabel = AUDIT_FILTERS.find((f) => f.value === filter)?.label ?? '全部'
 
   const query = useInfiniteQuery({
     queryKey: ['admin', 'audit', slug, filter],
@@ -33,6 +37,11 @@ export function AuditPage() {
             記錄誰在什麼時候做了什麼。日誌只能新增、不能修改或刪除,而且不會記錄
             Email、電話、備註內容或休假原因。
           </p>
+        </div>
+        <div className="page-actions">
+          <button type="button" className="btn btn-secondary" onClick={() => setExporting(true)}>
+            匯出 CSV
+          </button>
         </div>
       </div>
 
@@ -87,6 +96,22 @@ export function AuditPage() {
           </button>
         </div>
       )}
+
+      <ExportDialog
+        open={exporting}
+        onClose={() => setExporting(false)}
+        title="匯出稽核日誌"
+        description={
+          <>
+            匯出成 CSV(可用 Excel 開啟),類別:<strong>{filterLabel}</strong>。一次最多 50,000
+            筆,超過請縮小日期範圍。匯出本身也會被記錄。
+          </>
+        }
+        successNote="已匯出,檔案正在下載。這次匯出也已記錄在稽核日誌裡。"
+        run={(range) => exportAudit(slug, { action: filter || undefined, ...range })}
+        // 匯出本身會留下一筆稽核紀錄,讓列表重新整理就看得到
+        onExported={() => queryClient.invalidateQueries({ queryKey: ['admin', 'audit', slug] })}
+      />
     </div>
   )
 }
