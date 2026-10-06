@@ -182,6 +182,33 @@ async fn create(
 struct UpdateBooking {
     status: Option<BookingStatus>,
     notes: Option<String>,
+    /// 取消原因(選填,只能和 `status: cancelled` 一起送)。**只寫進通知信**,不存資料庫、不進稽核
+    cancel_reason: Option<String>,
+}
+
+const CANCEL_REASON_MAX_CHARS: usize = 200;
+
+/// 取消原因:去掉前後空白,空的當作沒填;限制長度與字元。
+/// 控制字元(換行與 Tab 除外)一律拒絕:NUL 會讓資料庫寫入失敗(500),
+/// 其他控制字元放進信裡沒有任何正當用途。
+fn clean_cancel_reason(raw: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let reason = raw.trim();
+    if reason.is_empty() {
+        return Ok(None);
+    }
+    if reason.chars().count() > CANCEL_REASON_MAX_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "取消原因最多 {CANCEL_REASON_MAX_CHARS} 字"
+        )));
+    }
+    if reason
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(AppError::BadRequest("取消原因含有不允許的字元".into()));
+    }
+    Ok(Some(reason.to_string()))
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -207,6 +234,10 @@ async fn update(
         return Err(AppError::BadRequest(
             "只能改為 cancelled、completed 或 no_show".into(),
         ));
+    }
+    let cancel_reason = clean_cancel_reason(req.cancel_reason.clone())?;
+    if cancel_reason.is_some() && req.status != Some(BookingStatus::Cancelled) {
+        return Err(AppError::BadRequest("取消原因只能在取消預約時填寫".into()));
     }
 
     let mut tx = ctx.begin(&state).await?;
@@ -253,14 +284,22 @@ async fn update(
     .await?;
     // 備註可能含顧客個資,稽核只記「備註有異動」,不記內容
     let (action, detail) = match req.status {
-        Some(to) => (
-            match to {
-                BookingStatus::Cancelled => "booking.cancelled",
-                BookingStatus::Completed => "booking.completed",
-                _ => "booking.no_show",
-            },
-            json!({ "from": status, "to": to, "notes_changed": notes_changed }),
-        ),
+        Some(to) => {
+            let mut detail = json!({ "from": status, "to": to, "notes_changed": notes_changed });
+            // 原因本身不進稽核(可能含個資、而且稽核刪不掉),只記「有填」。
+            // 沒填就不加這個欄位:完成 / 未到 / 沒帶原因的取消,稽核格式與以前完全一樣
+            if cancel_reason.is_some() {
+                detail["has_reason"] = json!(true);
+            }
+            (
+                match to {
+                    BookingStatus::Cancelled => "booking.cancelled",
+                    BookingStatus::Completed => "booking.completed",
+                    _ => "booking.no_show",
+                },
+                detail,
+            )
+        }
         None => ("booking.notes_updated", json!({ "notes_changed": true })),
     };
     audit::record(
@@ -285,7 +324,7 @@ async fn update(
         outbox::enqueue(
             &mut tx,
             ctx.tenant_id,
-            &mail::cancelled_by_shop(&m.view(), &link),
+            &mail::cancelled_by_shop(&m.view(), &link, cancel_reason.as_deref()),
             Some(&format!("cancelled:{id}:customer")),
         )
         .await?;
@@ -295,6 +334,7 @@ async fn update(
                 &m.staff_email,
                 &m.customer_name,
                 mail::CancelledBy::Manager,
+                cancel_reason.as_deref(),
             );
             outbox::enqueue(
                 &mut tx,

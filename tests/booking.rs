@@ -1561,3 +1561,211 @@ async fn cancelling_first_makes_deactivation_possible(pool: PgPool) {
     assert_eq!(cancel_as(&s, &s.owner, id).await.0, StatusCode::OK);
     assert_eq!(deactivate(&s, b_id).await.0, StatusCode::NO_CONTENT);
 }
+
+// ---------- 取消原因 ----------
+
+async fn cancel_with(s: &Shop, token: &str, id: &str, body: Value) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::PATCH,
+        &format!("/t/shop-a/bookings/{id}"),
+        Some(body),
+        Some(token),
+    )
+    .await
+}
+
+async fn mail_body(pool: &PgPool, key: &str) -> Option<(String, String)> {
+    sqlx::query_as("SELECT subject, body FROM email_outbox WHERE dedupe_key = $1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn the_cancel_reason_goes_into_the_mail_but_nowhere_else(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (_, created) = book(&s.app, &s, Some(b_id), at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    let reason = "老師臨時生病,抱歉!\n下週三(10/14)有空檔,歡迎再預約,謝謝。";
+
+    let (status, body) = cancel_with(
+        &s,
+        &s.owner,
+        id,
+        json!({"status": "cancelled", "cancel_reason": reason}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 顧客的信:有原因,而且每一行都縮排(看得出是店家的話,不是信本身的內容)
+    let (subject, customer) = mail_body(&pool, &format!("cancelled:{id}:customer"))
+        .await
+        .unwrap();
+    assert!(
+        customer.contains(
+            "店家說明的原因:\n    老師臨時生病,抱歉!\n    下週三(10/14)有空檔,歡迎再預約,謝謝。"
+        ),
+        "{customer}"
+    );
+    // 原因絕不進標題(標題裡的換行 = 郵件標頭注入)
+    assert!(
+        !subject.contains("生病") && !subject.contains('\n'),
+        "{subject}"
+    );
+    // 管理者取消別人負責的預約,負責的員工也看得到原因
+    let (_, staff) = mail_body(&pool, &format!("cancelled:{id}:staff"))
+        .await
+        .unwrap();
+    assert!(staff.contains("老師臨時生病"), "{staff}");
+
+    // 稽核只記「有填」,不記內容(可能含個資,而且稽核刪不掉)
+    let detail: Value =
+        sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action = 'booking.cancelled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(detail["has_reason"], true);
+    let everything: String =
+        sqlx::query_scalar("SELECT string_agg(detail::text, ' ') FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !everything.contains("生病") && !everything.contains("10/14"),
+        "稽核不該有原因內容"
+    );
+    // 預約本身(備註欄)也不存
+    let notes: Option<String> =
+        sqlx::query_scalar("SELECT notes FROM bookings WHERE id = $1::uuid")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(notes, None);
+}
+
+#[sqlx::test]
+async fn without_a_reason_the_mail_has_no_reason_section(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, created) = book(&s.app, &s, None, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    // 空白也當作沒填
+    let (status, _) = cancel_with(
+        &s,
+        &s.owner,
+        id,
+        json!({"status": "cancelled", "cancel_reason": "   \n  "}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, customer) = mail_body(&pool, &format!("cancelled:{id}:customer"))
+        .await
+        .unwrap();
+    assert!(!customer.contains("店家說明的原因"), "{customer}");
+    assert!(
+        customer.contains("這個時段已釋出"),
+        "其餘內容不變: {customer}"
+    );
+    let detail: Value =
+        sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action = 'booking.cancelled'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        detail.get("has_reason").is_none(),
+        "沒填原因就不加欄位: {detail}"
+    );
+}
+
+#[sqlx::test]
+async fn cancel_reason_is_validated(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, created) = book(&s.app, &s, None, at(day(3), 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+
+    // 太長(201 個字)、控制字元(NUL 會讓資料庫寫入失敗、其他控制字元沒有正當用途)
+    for (bad, why) in [
+        ("字".repeat(201), "超過 200 字"),
+        ("原因\u{0}結尾".to_string(), "NUL"),
+        ("原因\u{7}響鈴".to_string(), "響鈴字元"),
+        ("原因\r\nBcc: evil@example.com".to_string(), "CR"),
+    ] {
+        let (status, body) = cancel_with(
+            &s,
+            &s.owner,
+            id,
+            json!({"status": "cancelled", "cancel_reason": bad}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+    }
+    // 原因只能和「取消」一起送
+    for status_field in [
+        json!({}),
+        json!({"status": "completed"}),
+        json!({"notes": "x"}),
+    ] {
+        let mut body = status_field.clone();
+        body["cancel_reason"] = json!("原因");
+        let (status, resp) = cancel_with(&s, &s.owner, id, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{status_field}: {resp}");
+    }
+    // 被拒絕的請求什麼都沒改:預約還在、沒寄信
+    let status: String =
+        sqlx::query_scalar("SELECT status::text FROM bookings WHERE id = $1::uuid")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "confirmed");
+    assert!(
+        mail_body(&pool, &format!("cancelled:{id}:customer"))
+            .await
+            .is_none()
+    );
+
+    // 剛好 200 字可以;換行與縮排原樣保留
+    let (status, _) = cancel_with(
+        &s,
+        &s.owner,
+        id,
+        json!({"status": "cancelled", "cancel_reason": "字".repeat(200)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn a_reason_for_an_unverified_or_past_booking_sends_nothing(pool: PgPool) {
+    let s = shop(&pool).await;
+    // 待確認:Email 還沒驗證,不寄(原因也就不會寄到那個地址)
+    let (_, pending) = book(&s.app, &s, None, at(day(3), 10, 0), "p@example.com").await;
+    let pid = pending["id"].as_str().unwrap();
+    sqlx::query("UPDATE bookings SET status = 'pending' WHERE id = $1::uuid")
+        .bind(pid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = cancel_with(
+        &s,
+        &s.owner,
+        pid,
+        json!({"status": "cancelled", "cancel_reason": "不會寄出"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        mail_body(&pool, &format!("cancelled:{pid}:customer"))
+            .await
+            .is_none()
+    );
+    let any: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM email_outbox WHERE body LIKE '%不會寄出%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(any, 0);
+}

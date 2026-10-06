@@ -263,6 +263,91 @@ describe('預約列表', () => {
     expect(s.calls[0].body).toEqual({ status: 'cancelled' })
   })
 
+  describe('取消原因', () => {
+    const cancelBody = () => {
+      const s = spy<{ status?: string; cancel_reason?: string }>()
+      server.use(
+        http.patch(`${API}/t/demo-salon/bookings/b1`, async ({ request }) => {
+          await s.record(request)
+          return HttpResponse.json({ id: 'b1', status: 'cancelled', notes: null })
+        }),
+      )
+      return s
+    }
+    const openCancel = async (b = booking()) => {
+      mockBookings([b])
+      renderApp('/admin/demo-salon/bookings?date=2026-10-05')
+      const user = userEvent.setup()
+      const row = (await screen.findByText(b.customer_name)).closest('li')!
+      await user.click(within(row).getByRole('button', { name: '取消' }))
+      return { user, dialog: await screen.findByRole('dialog') }
+    }
+
+    it('已確認、還沒開始:會寄信通知顧客,所以問原因;送出去的是去掉前後空白的原因', async () => {
+      const s = cancelBody()
+      const { user, dialog } = await openCancel()
+      expect(within(dialog).getByText(/系統會寄信通知顧客/)).toBeInTheDocument()
+      expect(within(dialog).getByText(/不會另外儲存/)).toBeInTheDocument()
+      await user.type(within(dialog).getByLabelText('取消原因(選填)'), '  老師臨時生病,抱歉!  ')
+      await user.click(within(dialog).getByRole('button', { name: '確定取消' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ status: 'cancelled', cancel_reason: '老師臨時生病,抱歉!' })
+    })
+
+    it('沒填 / 只有空白 → 不送原因欄位', async () => {
+      const s = cancelBody()
+      const { user, dialog } = await openCancel()
+      await user.type(within(dialog).getByLabelText('取消原因(選填)'), '   ')
+      await user.click(within(dialog).getByRole('button', { name: '確定取消' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ status: 'cancelled' })
+    })
+
+    it('待確認的預約(不會寄信)與已經開始的預約都不問原因,也不會送原因', async () => {
+      const s = cancelBody()
+      const { user, dialog } = await openCancel(booking({ status: 'pending' }))
+      expect(within(dialog).queryByLabelText('取消原因(選填)')).not.toBeInTheDocument()
+      expect(within(dialog).queryByText(/系統會寄信/)).not.toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: '確定取消' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ status: 'cancelled' })
+    })
+
+    it('已經開始的預約:不問原因', async () => {
+      cancelBody()
+      const { dialog } = await openCancel(
+        booking({
+          starts_at: taipei('2026-10-05', '08:00'),
+          ends_at: taipei('2026-10-05', '09:00'),
+        }),
+      )
+      expect(within(dialog).queryByLabelText('取消原因(選填)')).not.toBeInTheDocument()
+    })
+
+    it('關掉再開,上一次打的原因不會留著(不會把 A 顧客的原因寄給 B 顧客)', async () => {
+      cancelBody()
+      const { user, dialog } = await openCancel()
+      await user.type(within(dialog).getByLabelText('取消原因(選填)'), '只給 A')
+      await user.click(within(dialog).getByRole('button', { name: '取消' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      const row = screen.getByText('王小明').closest('li')!
+      await user.click(within(row).getByRole('button', { name: '取消' }))
+      const again = await screen.findByRole('dialog')
+      expect(within(again).getByLabelText('取消原因(選填)')).toHaveValue('')
+    })
+
+    it('後端拒絕(例如太長)→ 顯示原因,視窗不關,填的內容還在', async () => {
+      server.use(
+        http.patch(`${API}/t/demo-salon/bookings/b1`, () => error(400, '取消原因最多 200 字')),
+      )
+      const { user, dialog } = await openCancel()
+      await user.type(within(dialog).getByLabelText('取消原因(選填)'), '很長的原因')
+      await user.click(within(dialog).getByRole('button', { name: '確定取消' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('最多 200 字')
+      expect(within(dialog).getByLabelText('取消原因(選填)')).toHaveValue('很長的原因')
+    })
+  })
+
   it('已經結束的預約才有「完成 / 未到」;還沒開始的沒有', async () => {
     mockBookings([
       booking({

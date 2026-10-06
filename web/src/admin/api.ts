@@ -108,7 +108,12 @@ export const rescheduleBooking = (slug: string, id: string, start: string) =>
 export const updateBooking = (
   slug: string,
   id: string,
-  body: { status?: Exclude<BookingStatus, 'pending' | 'confirmed'>; notes?: string },
+  body: {
+    status?: Exclude<BookingStatus, 'pending' | 'confirmed'>
+    notes?: string
+    /** 取消原因(選填,只能和 status: cancelled 一起送);只會寫進通知顧客的信,不會被儲存 */
+    cancel_reason?: string
+  },
 ) =>
   call<{ id: string; status: BookingStatus; notes: string | null }>(
     `/t/${enc(slug)}/bookings/${enc(id)}`,

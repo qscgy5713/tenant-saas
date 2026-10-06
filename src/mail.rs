@@ -206,15 +206,33 @@ pub fn shop_page_link(base_url: &str, slug: &str) -> String {
 }
 
 /// 店家取消了預約,通知顧客。只用於「已確認」的預約:待確認的 Email 還沒驗證過,不該寄信給它
-pub fn cancelled_by_shop(m: &BookingMail, shop_link: &str) -> Email {
+///
+/// `reason` 是店家填的取消原因(選填)。它是**純文字**,只放在內文,絕不進標題
+/// (標題裡的換行會變成郵件標頭注入);多行時每一行都縮排,避免看起來像信件本身的內容。
+pub fn cancelled_by_shop(m: &BookingMail, shop_link: &str, reason: Option<&str>) -> Email {
     Email {
         to: m.to.to_string(),
         subject: format!("預約已取消:{}", m.shop),
         body: format!(
-            "您好,\n\n很抱歉,店家取消了下列預約:\n\n  店家:{}\n  服務:{}\n  人員:{}\n  時間:{}\n\n\
+            "您好,\n\n很抱歉,店家取消了下列預約:\n\n  店家:{}\n  服務:{}\n  人員:{}\n  時間:{}\n{}\n\
              這個時段已釋出。如需重新預約,請至:\n\n  {shop_link}\n",
-            m.shop, m.service, m.staff, m.when
+            m.shop,
+            m.service,
+            m.staff,
+            m.when,
+            reason_block(reason)
         ),
+    }
+}
+
+/// 取消原因的區塊(沒有就是空字串)。原因裡的每一行都縮排兩格
+fn reason_block(reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|r| !r.is_empty()) {
+        None => String::new(),
+        Some(r) => {
+            let indented: Vec<String> = r.lines().map(|l| format!("    {l}")).collect();
+            format!("\n  店家說明的原因:\n{}\n", indented.join("\n"))
+        }
     }
 }
 
@@ -231,6 +249,7 @@ pub fn cancelled_for_staff(
     to: &str,
     customer_name: &str,
     by: CancelledBy,
+    reason: Option<&str>,
 ) -> Email {
     let who = match by {
         CancelledBy::Customer => "顧客自己取消了",
@@ -240,9 +259,12 @@ pub fn cancelled_for_staff(
         to: to.to_string(),
         subject: format!("預約已取消:{}", m.shop),
         body: format!(
-            "您好,\n\n{who}一筆由您負責的預約:\n\n  店家:{}\n  顧客:{customer_name}\n  服務:{}\n  時間:{}\n\n\
+            "您好,\n\n{who}一筆由您負責的預約:\n\n  店家:{}\n  顧客:{customer_name}\n  服務:{}\n  時間:{}\n{}\n\
              這個時段已釋出,不需要再準備。\n",
-            m.shop, m.service, m.when
+            m.shop,
+            m.service,
+            m.when,
+            reason_block(reason)
         ),
     }
 }

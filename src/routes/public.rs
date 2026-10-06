@@ -677,6 +677,7 @@ async fn cancel_booking(
             &m.staff_email,
             &m.customer_name,
             mail::CancelledBy::Customer,
+            None,
         );
         outbox::enqueue(
             &mut tx,

@@ -30,6 +30,9 @@ export function BookingRow({
   const now = useNow()
   const started = new Date(booking.starts_at).getTime() <= now
   const live = booking.status === 'pending' || booking.status === 'confirmed'
+  // 只有「已確認、還沒開始」的取消才會寄信給顧客,所以只有這時候問原因
+  const emailsCustomer = booking.status === 'confirmed' && !started
+  const [cancelReason, setCancelReason] = useState('')
 
   const mutation = useMutation({
     mutationFn: (body: Parameters<typeof updateBooking>[2]) =>
@@ -38,6 +41,7 @@ export function BookingRow({
       queryClient.invalidateQueries({ queryKey: bookingsKey(slug) })
       queryClient.invalidateQueries({ queryKey: ['admin', 'plan', slug] })
       setAsking(null)
+      setCancelReason('')
       setEditingNotes(false)
     },
   })
@@ -131,14 +135,40 @@ export function BookingRow({
       <ConfirmDialog
         open={asking === 'cancel'}
         title="取消這筆預約?"
-        message={`${booking.customer_name} 的「${booking.service_name}」(${formatDayLong(ymdInTz(booking.starts_at, tz))} ${formatTime(booking.starts_at, tz)})會被取消,時段會釋出。取消後無法復原。`}
+        message={`${booking.customer_name} 的「${booking.service_name}」(${formatDayLong(ymdInTz(booking.starts_at, tz))} ${formatTime(booking.starts_at, tz)})會被取消,時段會釋出。取消後無法復原。${emailsCustomer ? '系統會寄信通知顧客。' : ''}`}
         confirmLabel="確定取消"
         danger
         pending={mutation.isPending}
         error={asking ? error : null}
-        onConfirm={() => mutation.mutate({ status: 'cancelled' })}
+        extra={
+          emailsCustomer && (
+            <div className="field">
+              <label>
+                <span className="field-label">取消原因(選填)</span>
+                <textarea
+                  name="cancel_reason"
+                  rows={3}
+                  maxLength={200}
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                />
+              </label>
+              <p className="field-hint">
+                會寫進通知顧客的信,不會另外儲存。請勿填寫不想讓顧客看到的內容。
+              </p>
+            </div>
+          )
+        }
+        onConfirm={() =>
+          mutation.mutate({
+            status: 'cancelled',
+            // 只在真的會寄信時才送;空白當作沒填
+            cancel_reason: emailsCustomer ? cancelReason.trim() || undefined : undefined,
+          })
+        }
         onClose={() => {
           setAsking(null)
+          setCancelReason('')
           mutation.reset()
         }}
       />

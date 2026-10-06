@@ -67,6 +67,7 @@ export function ConfirmDialog({
   danger = false,
   pending = false,
   error,
+  extra,
   onConfirm,
   onClose,
 }: {
@@ -77,12 +78,15 @@ export function ConfirmDialog({
   danger?: boolean
   pending?: boolean
   error?: string | null
+  /** 說明文字下方的額外內容(例如輸入欄位) */
+  extra?: ReactNode
   onConfirm: () => void
   onClose: () => void
 }) {
   return (
     <Modal open={open} title={title} onClose={onClose}>
       <p>{message}</p>
+      {extra}
       {error && (
         <div className="notice notice-error" role="alert">
           {error}
