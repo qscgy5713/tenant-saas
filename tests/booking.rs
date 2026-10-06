@@ -1978,3 +1978,24 @@ async fn a_staff_member_leaving_can_hand_over_their_own_bookings(pool: PgPool) {
         s.owner_id
     );
 }
+
+#[sqlx::test]
+async fn deactivating_works_with_a_json_content_type_and_an_empty_body(pool: PgPool) {
+    // 前端的 fetch 一律帶 Content-Type: application/json,沒有改派時 body 是空的
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let post = |body: &'static str| {
+        let req = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(format!("/t/shop-a/members/{b_id}/deactivate"))
+            .header("authorization", format!("Bearer {}", s.owner))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let app = s.app.clone();
+        async move { tower::ServiceExt::oneshot(app, req).await.unwrap().status() }
+    };
+    // 壞掉的 JSON 是 400,不會被當成沒帶
+    assert_eq!(post("{oops").await, StatusCode::BAD_REQUEST);
+    assert_eq!(post("").await, StatusCode::NO_CONTENT);
+}

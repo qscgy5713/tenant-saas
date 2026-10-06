@@ -344,12 +344,17 @@ pub fn parse_event(
         }));
     }
     if kind == "invoice.paid" {
+        // 每次續訂都會有這個事件,所以要寬鬆:缺客戶或發票編號(例如沒有客戶的一次性發票)
+        // 就當作與我們無關而忽略,不能回 400 —— Stripe 會一直重送,還會把 webhook 標成失敗
         let inv = &event["data"]["object"];
+        let (Some(customer), Some(invoice)) = (inv["customer"].as_str(), inv["id"].as_str()) else {
+            return Ok(Parsed::Ignored);
+        };
         return Ok(Parsed::PaymentPaid(PaymentPaid {
             event_id: text(&event["id"], "id")?,
             kind: kind.to_string(),
-            customer: text(&inv["customer"], "customer")?,
-            invoice: text(&inv["id"], "invoice id")?,
+            customer: customer.to_string(),
+            invoice: invoice.to_string(),
         }));
     }
     if !SUBSCRIPTION_EVENTS.contains(&kind) {

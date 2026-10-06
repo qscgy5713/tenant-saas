@@ -2,6 +2,12 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-06(修正:停用成員的 E2E 失敗)
+- 上一批 push 後 CI 的 `e2e` 失敗:停用員工回「操作失敗」。**原因**:前端 `fetch` 一律帶 `Content-Type: application/json`,沒有改派時 body 是空的,而我用的 `Option<Json<T>>` 對「有 Content-Type 但 body 為空」會直接拒絕(400)。
+- 為什麼單元 / 整合測試沒抓到:測試輔助函式 `call` 在沒有 body 時**不帶** Content-Type,和真實瀏覽器的請求不一樣。上一輪回報時我就說「E2E 這輪沒重跑」—— 它正好抓到了。教訓:動到會被前端呼叫的端點的請求格式,就要跑 E2E。
+- **補做的 CR 又找到一個**:`invoice.paid` 缺 `customer` / 發票編號時我的解析會回 400。它是 Stripe 最常見的事件(每次續訂),回 400 會讓 Stripe 一直重送並把 webhook 標成失敗;原本這類事件是被忽略的。改成缺欄位就忽略(回 200),測試改成斷言 200 `ignored`,突變(改回回錯誤)被 2 個測試抓到。
+- 修正:後端自己解析 body(空 = 沒帶,壞掉的 JSON = 400),補一個送「JSON Content-Type + 空 body」的測試(突變驗證:拿掉空 body 處理就失敗);本機 E2E 9 個全過。
+
 ## 2026-10-06(告警規則 + 正式環境 compose)
 - `deploy/alerts.yml`(9 條)、`alerts_test.yml`(promtool 行為測試,改門檻會失敗)、`prometheus.yml`、`docker-compose.prod.yml`、`env.prod.example`;CI 新增 `deploy-config` 工作;`.gitignore` 排除 `deploy/.env.prod`、`deploy/secrets/`
 - 驗證:`promtool check/test rules` 通過(突變門檻 → 失敗);`docker compose config` 通過、缺必填變數會報錯。**`promtool check config` 在本機會因 `/run/secrets/metrics_token` 不存在而失敗**(容器內才有),所以 CI 只檢查規則檔

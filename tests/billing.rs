@@ -671,6 +671,18 @@ async fn unrelated_unknown_and_misconfigured_events_are_handled_safely(pool: PgP
         (StatusCode::OK, Some("ignored"))
     );
 
+    // invoice.paid 缺客戶 / 發票編號(沒有客戶的一次性發票):也是收下,不能回 400 讓 Stripe 一直重送
+    let (status, body) = send_event(
+        &s.app,
+        json!({"id": "evt_nocust", "type": "invoice.paid", "created": 1, "data": {"object": {"id": "in_x"}}}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["result"].as_str()),
+        (StatusCode::OK, Some("ignored")),
+        "{body}"
+    );
+
     // 不認識的客戶(不是我們的):不改任何東西
     let (status, body) = send_event(
         &s.app,
@@ -1125,13 +1137,13 @@ async fn normal_renewals_and_other_invoices_send_no_recovery_mail(pool: PgPool) 
         (status, body["result"].as_str()),
         (StatusCode::OK, Some("unknown_customer"))
     );
-    // 缺少必要欄位:400,而且事件沒被記成「已處理」
+    // 缺少必要欄位(沒有客戶):忽略但仍回 200(不讓 Stripe 重送),事件沒被記成「已處理」
     let (status, _) = send_event(
         &s.app,
         json!({"id": "evt_bad", "type": "invoice.paid", "created": 1, "data": {"object": {"id": "in_1"}}}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK);
     let recorded: i64 =
         sqlx::query_scalar("SELECT count(*) FROM stripe_events WHERE id = 'evt_bad'")
             .fetch_one(&s.pool)

@@ -410,9 +410,17 @@ async fn deactivate_member(
     State(state): State<AppState>,
     ctx: TenantCtx,
     Path((_slug, user_id)): Path<(String, Uuid)>,
-    body: Option<Json<DeactivateBody>>,
+    body: axum::body::Bytes,
 ) -> Result<StatusCode, AppError> {
-    let reassign_to = body.and_then(|Json(b)| b.reassign_to);
+    // 前端的 fetch 一律帶 JSON 的 Content-Type,沒有改派時 body 是空的:空 body 視為沒帶,
+    // 不能用 Option<Json>(它對「有 Content-Type 但 body 為空」會直接拒絕)
+    let reassign_to = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<DeactivateBody>(&body)
+            .map_err(|_| AppError::BadRequest("請求內容格式不正確".into()))?
+            .reassign_to
+    };
     let mut tx = ctx.begin(&state).await?;
     let row: Option<(Role, bool)> =
         sqlx::query_as("SELECT role, active FROM memberships WHERE user_id = $1 FOR UPDATE")
