@@ -66,6 +66,10 @@ export const verifyEmail = (token: string) =>
 export const resendVerification = () =>
   call<{ message: string }>('/auth/resend-verification', { method: 'POST' })
 
+/** 刪除自己的帳號(不可還原):要重新輸入密碼。成功後後端會清掉登入 cookie */
+export const deleteAccountRequest = (password: string) =>
+  api<void>('/auth/delete-account', json({ password }))
+
 /** 登出所有裝置:此刻之前簽發的登入全部失效,包含目前這個 */
 export const logoutAllRequest = () => api<void>('/auth/logout-all', { method: 'POST' })
 

@@ -264,5 +264,7 @@ async fn anonymize(
     )
     .await?;
     tx.commit().await?;
+    // 資料庫以外的紀錄(只有 id):從備份還原會把已刪除的資料救回來,要靠它知道哪些得重做。見 docs/deployment.md
+    tracing::info!(customer_id = %id, tenant_id = %ctx.tenant_id, "顧客資料已刪除(匿名化)");
     Ok(StatusCode::NO_CONTENT)
 }

@@ -1988,3 +1988,8 @@
   margin: 0 0 12px;
   border-radius: 0;
 }
+
+.shops-foot {
+  margin-top: 32px;
+  text-align: center;
+}

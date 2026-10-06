@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { logoutAllRequest, logoutRequest } from './api'
+import { deleteAccountRequest, logoutAllRequest, logoutRequest } from './api'
 import { clearSession } from './session'
 
 /**
@@ -21,6 +21,21 @@ export function useLogoutAll() {
   const navigate = useNavigate()
   return async () => {
     await logoutAllRequest()
+    clearSession()
+    queryClient.clear()
+    navigate('/admin/login', { replace: true })
+  }
+}
+
+/**
+ * 刪除帳號:要輸入密碼,失敗(密碼不對、還是店主、還有預約)由呼叫端顯示原因;
+ * 成功才清除前端狀態(和登出所有裝置一樣,不能在失敗時假裝成功)
+ */
+export function useDeleteAccount() {
+  const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  return async (password: string) => {
+    await deleteAccountRequest(password)
     clearSession()
     queryClient.clear()
     navigate('/admin/login', { replace: true })

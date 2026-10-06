@@ -166,6 +166,8 @@ jobs:
         run: |
           docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest check rules /d/alerts.yml
           docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest test rules /d/alerts_test.yml
+      - name: 備份腳本(假的 pg_dump,測試清理與驗證邏輯)
+        run: bash deploy/backup_test.sh
       - name: docker-compose.prod.yml 能解析
         run: |
           mkdir -p deploy/secrets && echo ci-placeholder-token > deploy/secrets/metrics_token

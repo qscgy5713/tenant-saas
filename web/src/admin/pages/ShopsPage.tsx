@@ -10,7 +10,7 @@ import { validateName, validateSlug } from '../../lib/validate'
 import { createShop, listShops, resendVerification } from '../api'
 import { ConfirmDialog, Modal } from '../components/Modal'
 import { TextField } from '../components/AuthCard'
-import { useLogout, useLogoutAll } from '../logout'
+import { useDeleteAccount, useLogout, useLogoutAll } from '../logout'
 import { TIMEZONES } from '../timezones'
 import { ROLE_LABEL } from '../ShopContext'
 import { restoreSession, useSession } from '../session'
@@ -24,6 +24,10 @@ export function ShopsPage() {
   const [signingOutAll, setSigningOutAll] = useState(false)
   const logoutAll = useLogoutAll()
   const logoutAllMutation = useMutation({ mutationFn: logoutAll })
+  const [deletingAccount, setDeletingAccount] = useState(false)
+  const [password, setPassword] = useState('')
+  const deleteAccount = useDeleteAccount()
+  const deleteMutation = useMutation({ mutationFn: () => deleteAccount(password) })
 
   return (
     <div className="shops-page">
@@ -89,6 +93,43 @@ export function ShopsPage() {
       )}
 
       <CreateShopModal open={creating} onClose={() => setCreating(false)} />
+      <p className="shops-foot">
+        <button type="button" className="link-btn" onClick={() => setDeletingAccount(true)}>
+          刪除我的帳號
+        </button>
+      </p>
+      <ConfirmDialog
+        open={deletingAccount}
+        title="刪除你的帳號?"
+        message="帳號會被永久刪除,無法還原:你的姓名與 Email 會被抹除、所有裝置立刻登出,這個 Email 之後可以重新註冊。你曾經負責的歷史預約會保留,但不再顯示你的名字。如果你還是某家店的擁有者,要先刪除那家店;還有負責的未來預約也要先處理。"
+        confirmLabel="永久刪除帳號"
+        danger
+        pending={deleteMutation.isPending}
+        error={
+          deleteMutation.error instanceof ApiError
+            ? deleteMutation.error.message
+            : deleteMutation.error
+              ? '操作失敗,請再試一次。'
+              : null
+        }
+        extra={
+          <TextField label="輸入密碼確認">
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </TextField>
+        }
+        onConfirm={() => deleteMutation.mutate()}
+        onClose={() => {
+          setDeletingAccount(false)
+          setPassword('')
+          deleteMutation.reset()
+        }}
+      />
       <ConfirmDialog
         open={signingOutAll}
         title="登出所有裝置?"

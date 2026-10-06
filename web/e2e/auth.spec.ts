@@ -6,6 +6,7 @@ import {
   createShop,
   linkIn,
   loginViaUi,
+  register,
   signIn,
   uniq,
   waitForMail,
@@ -168,4 +169,35 @@ test('未登入的瀏覽器(例如在手機上開信)點驗證連結:成功畫�
   await expect(page).toHaveURL(/\/admin\/verify/)
   await expect(page.getByRole('heading', { name: 'Email 已驗證' })).toBeVisible()
   await context.close()
+})
+
+test('刪除帳號:輸入密碼確認 → 登出 → 舊帳號登不進去、Email 可以重新註冊', async ({
+  page,
+  request,
+}) => {
+  const account = await register(request, '要離開的人')
+  await signIn(page, account.email)
+  await page.goto('/admin')
+  await page.getByRole('button', { name: '刪除我的帳號' }).click()
+  const dialog = page.getByRole('dialog')
+  // 密碼不對:原因顯示在視窗裡,仍在登入
+  await dialog.getByLabel('輸入密碼確認').fill('wrong-password-x')
+  await dialog.getByRole('button', { name: '永久刪除帳號' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('密碼不正確')
+
+  await dialog.getByLabel('輸入密碼確認').fill(PASSWORD)
+  await dialog.getByRole('button', { name: '永久刪除帳號' }).click()
+  await expect(page.getByRole('heading', { name: '登入' })).toBeVisible()
+
+  // 舊帳號登不進去
+  await page.getByLabel('Email').fill(account.email)
+  await page.getByLabel('密碼').fill(PASSWORD)
+  await page.getByRole('button', { name: '登入' }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+
+  // 同一個 Email 可以重新註冊(全新的帳號)
+  const again = await request.post(`${API}/auth/register`, {
+    data: { email: account.email, password: PASSWORD, name: '回來的人' },
+  })
+  expect(again.status()).toBe(201)
 })

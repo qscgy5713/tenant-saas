@@ -592,6 +592,34 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         StatusCode::NOT_FOUND
     );
 
+    // 4b. 刪除帳號(delete_account):要動 users、memberships、invitations、email_outbox、audit_logs
+    let leaver = format!("leaver-{unique}@example.com");
+    let leaver_token = signup(&app, &leaver).await;
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/auth/delete-account",
+        Some(json!({"password": "password123"})),
+        Some(&leaver_token),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "刪除帳號要能在受限帳號下運作: {body}"
+    );
+    assert_eq!(
+        call(&app, Method::GET, "/auth/me", None, Some(&leaver_token))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // 同一個 Email 可以重新註冊
+    assert_eq!(
+        common::register(&app, &leaver, "password123").await.0,
+        StatusCode::CREATED
+    );
+
     // 5. 資料保留(retention_* 函式由 worker 角色執行;店主端的函式由 tenant_app 執行)
     // 5a. worker 角色能呼叫稽核清除與匿名化(現有資料都很新,所以不會真的刪 / 匿名化任何東西)
     {

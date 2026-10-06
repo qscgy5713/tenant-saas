@@ -338,6 +338,9 @@ async fn anonymize_expired_customers(pool: &PgPool) -> Result<u64, AppError> {
                 sp.commit().await?;
                 if did {
                     done += 1;
+                    // 只記 id:從備份還原後,靠日誌知道哪些顧客需要重新匿名化(其實保留政策會自動再做一次,
+                    // 但店主手動刪除的不會)
+                    tracing::info!(customer_id = %customer, tenant_id = %tenant, "依保留政策匿名化顧客");
                 }
             }
             Err(err) => {

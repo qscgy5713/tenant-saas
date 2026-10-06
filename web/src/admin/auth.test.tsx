@@ -489,3 +489,60 @@ describe('登出所有裝置', () => {
     expect(getSession()).not.toBeNull()
   })
 })
+
+describe('刪除帳號', () => {
+  const open = async () => {
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '刪除我的帳號' }))
+    return { user, dialog: await screen.findByRole('dialog') }
+  }
+
+  it('輸入密碼確認後送出;成功才清除登入並回到登入頁', async () => {
+    loginAs()
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/delete-account`, async ({ request }) => {
+        bodies.push(await request.json())
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    renderApp('/admin')
+    const { user, dialog } = await open()
+    expect(bodies).toHaveLength(0) // 還沒確認
+    await user.type(within(dialog).getByLabelText('輸入密碼確認'), 'my-password-1')
+    await user.click(within(dialog).getByRole('button', { name: '永久刪除帳號' }))
+    expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
+    expect(bodies).toEqual([{ password: 'my-password-1' }])
+    expect(getSession()).toBeNull()
+  })
+
+  it('後端拒絕(密碼不對 / 還是店主)→ 原因顯示在視窗裡,仍在登入狀態', async () => {
+    loginAs()
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/delete-account`, () =>
+        error(409, '你還是某家店的擁有者,請先刪除那家店(設定頁 → 刪除店家)再刪除帳號'),
+      ),
+    )
+    renderApp('/admin')
+    const { user, dialog } = await open()
+    await user.type(within(dialog).getByLabelText('輸入密碼確認'), 'x'.repeat(8))
+    await user.click(within(dialog).getByRole('button', { name: '永久刪除帳號' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('還是某家店的擁有者')
+    expect(getSession()).not.toBeNull()
+    expect(dialog).toHaveAttribute('open')
+  })
+
+  it('關閉視窗會清掉已輸入的密碼', async () => {
+    loginAs()
+    server.use(http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])))
+    renderApp('/admin')
+    const { user, dialog } = await open()
+    await user.type(within(dialog).getByLabelText('輸入密碼確認'), 'secret-pass-1')
+    await user.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: '刪除我的帳號' }))
+    expect(within(await screen.findByRole('dialog')).getByLabelText('輸入密碼確認')).toHaveValue('')
+  })
+})

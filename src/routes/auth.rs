@@ -26,6 +26,8 @@ pub fn credential_routes() -> Router<AppState> {
         .route("/auth/forgot-password", post(forgot_password))
         .route("/auth/reset-password", post(reset_password))
         .route("/auth/verify-email", post(verify_email))
+        // 要登入 + 重新輸入密碼:放在這裡是為了套用每 IP 的限流(防止拿著被盜的登入狀態試密碼)
+        .route("/auth/delete-account", post(delete_account))
 }
 
 pub fn routes() -> Router<AppState> {
@@ -387,6 +389,53 @@ async fn logout_all(
         .bind(auth.id)
         .execute(&state.db)
         .await?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        AppendHeaders([
+            (header::SET_COOKIE, state.cookie.clear()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ]),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteAccountRequest {
+    password: String,
+}
+
+/// 刪除自己的帳號(不可還原)。要重新輸入密碼,防止被盜用的登入狀態直接把帳號刪掉。
+/// 不是刪除資料列而是匿名化(見 migration 0030):Email 釋出、名稱與密碼抹除、所有登入失效、成員資格停用。
+/// 還是某家店的擁有者、或還有負責的未來預約時不能刪。
+/// 密碼錯誤回 400 而不是 401:前端對 401 會直接當成登入過期而登出。
+async fn delete_account(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+        .bind(auth.id)
+        .fetch_one(&state.db)
+        .await?;
+    if !verify_password(req.password, hash).await {
+        return Err(AppError::BadRequest("密碼不正確".into()));
+    }
+    let result = sqlx::query("SELECT delete_account($1)")
+        .bind(auth.id)
+        .execute(&state.db)
+        .await;
+    if let Err(e) = result {
+        return Err(match pg_code(&e).as_deref() {
+            Some("P0002") => AppError::Conflict(
+                "你還是某家店的擁有者,請先刪除那家店(設定頁 → 刪除店家)再刪除帳號".into(),
+            ),
+            Some("P0001") => AppError::Conflict(
+                "你還有負責的未來預約,請先請店家改派或取消這些預約再刪除帳號".into(),
+            ),
+            Some("P0003") => AppError::Conflict("這個帳號已經刪除過了".into()),
+            _ => e.into(),
+        });
+    }
+    tracing::info!(user_id = %auth.id, "使用者帳號已刪除(匿名化)");
     Ok((
         StatusCode::NO_CONTENT,
         AppendHeaders([
