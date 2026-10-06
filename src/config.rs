@@ -19,6 +19,8 @@ pub struct Config {
     pub public_base_url: String,
     /// 每位使用者最多能「擁有」幾家店(防止灌店家、占用代稱)
     pub max_shops_per_user: u32,
+    /// 同一個收件者每小時最多收幾封信(跨店家;防止拿別人的 Email 當收件者騷擾)
+    pub max_mails_per_recipient_per_hour: u32,
     /// 以 cookie 登入時,允許送出「會改資料」請求的網頁來源(CSRF 防護,見 session.rs)
     pub allowed_origins: Vec<String>,
     pub worker_enabled: bool,
@@ -79,6 +81,11 @@ impl Config {
                 .unwrap_or_else(|_| "預約系統 <noreply@localhost>".into()),
             public_base_url,
             max_shops_per_user: parse_max_shops(std::env::var("MAX_SHOPS_PER_USER").ok())?,
+            max_mails_per_recipient_per_hour: parse_positive(
+                "MAX_MAILS_PER_RECIPIENT_PER_HOUR",
+                std::env::var("MAX_MAILS_PER_RECIPIENT_PER_HOUR").ok(),
+                6,
+            )?,
             allowed_origins,
             worker_enabled: std::env::var("WORKER_ENABLED")
                 .map(|v| v != "false" && v != "0")
@@ -102,12 +109,20 @@ impl Config {
 
 /// `MAX_SHOPS_PER_USER`:沒設定 = 5;0 會讓所有人都建立不了店家,視為設定錯誤
 pub fn parse_max_shops(value: Option<String>) -> Result<u32> {
+    parse_positive("MAX_SHOPS_PER_USER", value, 5)
+}
+
+/// 正整數設定:沒設定 / 空字串用預設值;不是整數或是 0 都視為設定錯誤(0 會讓功能整個不能用)
+pub fn parse_positive(name: &str, value: Option<String>, default: u32) -> Result<u32> {
     let Some(v) = value.filter(|v| !v.is_empty()) else {
-        return Ok(5);
+        return Ok(default);
     };
-    let n: u32 = v.trim().parse().context("MAX_SHOPS_PER_USER 必須是整數")?;
+    let n: u32 = v
+        .trim()
+        .parse()
+        .with_context(|| format!("{name} 必須是整數"))?;
     if n == 0 {
-        bail!("MAX_SHOPS_PER_USER 至少要是 1(0 會讓所有人都建立不了店家)");
+        bail!("{name} 至少要是 1(0 會讓這個功能整個不能用)");
     }
     Ok(n)
 }

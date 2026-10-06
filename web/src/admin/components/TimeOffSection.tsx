@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { ApiError } from '../../api/client'
 import { ErrorState, Loading, Notice } from '../../components/States'
@@ -25,12 +25,17 @@ export function TimeOffSection({
   const queryClient = useQueryClient()
   const [adding, setAdding] = useState(false)
   const [deleting, setDeleting] = useState<TimeOff | null>(null)
+  const [showPast, setShowPast] = useState(false)
   const [now] = useState(() => Date.now())
 
-  const query = useQuery({
-    queryKey: ['admin', 'time-off', slug, userId],
-    queryFn: () => listTimeOff(slug, userId),
+  // 分頁:一次載入一頁,「載入更多」再抓下一頁。預設只看還沒結束的,已結束的另外看
+  const query = useInfiniteQuery({
+    queryKey: ['admin', 'time-off', slug, userId, showPast ? 'past' : 'upcoming'],
+    queryFn: ({ pageParam }) => listTimeOff(slug, userId, { past: showPast, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.has_more ? last.offset + last.limit : undefined),
   })
+  const items = query.data?.pages.flatMap((p) => p.items)
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ['admin', 'time-off', slug, userId] })
 
@@ -53,9 +58,21 @@ export function TimeOffSection({
       )}
       {query.isPending && <Loading label="載入休假…" />}
       {query.isError && <ErrorState error={query.error} onRetry={() => query.refetch()} />}
-      {query.data?.length === 0 && <p className="muted">沒有設定休假。</p>}
+      <div className="actions">
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={showPast}
+            onChange={(e) => setShowPast(e.target.checked)}
+          />
+          <span>只看已結束的</span>
+        </label>
+      </div>
+      {items?.length === 0 && (
+        <p className="muted">{showPast ? '沒有已結束的休假。' : '沒有設定休假。'}</p>
+      )}
       <ul className="rows">
-        {query.data?.map((t) => {
+        {items?.map((t) => {
           const past = new Date(t.ends_at).getTime() <= now
           return (
             <li key={t.id} className={`row ${past ? 'row-off' : ''}`}>
@@ -81,6 +98,19 @@ export function TimeOffSection({
           )
         })}
       </ul>
+      {query.hasNextPage && (
+        <div className="actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={query.isFetchingNextPage}
+            onClick={() => query.fetchNextPage()}
+          >
+            {query.isFetchingNextPage ? '載入中…' : '載入更多'}
+          </button>
+        </div>
+      )}
+      {query.isFetchNextPageError && <Notice tone="error">載入更多失敗,請再試一次。</Notice>}
       <p className="muted small">休假原因只有管理者與本人看得到。稽核日誌不會記錄原因。</p>
 
       <Modal open={adding} title="新增休假" onClose={() => setAdding(false)}>

@@ -30,7 +30,6 @@ pub fn routes() -> Router<AppState> {
             get(list_invitations).post(create_invitation),
         )
         .route("/t/{slug}/invitations/{id}", delete(revoke_invitation))
-        .route("/invitations/accept", post(accept_invitation))
         .route(
             "/t/{slug}/members/{user_id}",
             patch(change_role).delete(remove_member),
@@ -43,6 +42,12 @@ pub fn routes() -> Router<AppState> {
             "/t/{slug}/members/{user_id}/reactivate",
             post(reactivate_member),
         )
+}
+
+/// 接受邀請:另外掛限流(見 routes/mod.rs),與登入 / 註冊同一個限額。
+/// 需要登入而且 token 是 256 位元的隨機值,猜中不可行;限流是為了不讓它被拿來消耗資源。
+pub fn accept_routes() -> Router<AppState> {
+    Router::new().route("/invitations/accept", post(accept_invitation))
 }
 
 const INVITATION_TTL_DAYS: i64 = 7;
@@ -139,6 +144,12 @@ async fn create_invitation(
     };
     let link = mail::invitation_link(&state.public_base_url, &token);
     let invite_mail = mail::invitation(&email, &shop, role_label, &link);
+    outbox::ensure_recipient_quota(
+        &mut tx,
+        &invite_mail.to,
+        state.max_mails_per_recipient_per_hour,
+    )
+    .await?;
     outbox::enqueue(
         &mut tx,
         ctx.tenant_id,

@@ -27,6 +27,7 @@ pub fn test_config(ttl: u64) -> Config {
         mail_from: "test <test@example.com>".into(),
         public_base_url: "http://app.test".into(),
         max_shops_per_user: 5,
+        max_mails_per_recipient_per_hour: 100_000,
         allowed_origins: vec!["http://app.test".into()],
         worker_enabled: false,
         worker_poll_secs: 1,

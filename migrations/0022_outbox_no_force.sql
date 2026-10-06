@@ -1,0 +1,16 @@
+-- 修正:重設密碼、帳號鎖定通知、付款失敗通知在「正式環境的受限帳號」下會失敗。
+--
+-- 這三個 SECURITY DEFINER 函式(request_password_reset / login_failed / billing_payment_failed)
+-- 在沒有租戶上下文時寫入 email_outbox。email_outbox 是 FORCE ROW LEVEL SECURITY,連擁有者
+-- (函式以擁有者身分執行)都受政策約束;而政策是 `tenant_id = app_tenant_id()`,沒有租戶上下文時
+-- 為 NULL → 寫入被擋:`new row violates row-level security policy for table "email_outbox"`。
+--
+-- 後果(修正前):
+--   * 忘記密碼:整個請求 500
+--   * 帳號鎖定:第 5 次失敗要寫通知信 → 拋錯 → 交易回滾 → 失敗次數永遠停在 4,**根本鎖不住**
+--   * 付款失敗通知:webhook 500,Stripe 一直重送
+-- 一般測試用超級使用者連線(繞過 RLS),所以全部通過;只有受限帳號的環境才會出現。
+--
+-- 修法與 0011(bookings)一致:不對擁有者 FORCE。擁有者是 tenant_migrator,只用來套用 migration
+-- 與執行這些函式;應用程式使用的 tenant_app / tenant_worker 都不是擁有者,仍完全受 RLS 約束。
+ALTER TABLE email_outbox NO FORCE ROW LEVEL SECURITY;

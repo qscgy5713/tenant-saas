@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { groupByLocalDay, monthStart, monthWeeks } from '../../lib/calendar'
-import { dayOfMonth, formatTime, todayYmd, weekdayShort } from '../../lib/time'
+import { dayOfMonth, formatTime, weekdayShort } from '../../lib/time'
+import { useToday } from '../../lib/useToday'
 import { STATUS_LABEL } from '../labels'
 import type { AdminBooking } from '../types'
 
@@ -31,7 +32,7 @@ export function MonthCalendar({
   onOpenDay: (day: string) => void
 }) {
   const weeks = useMemo(() => monthWeeks(date), [date])
-  const today = todayYmd(tz)
+  const { today } = useToday(tz)
   const month = monthStart(date).slice(0, 7)
   const byDay = useMemo(
     () =>

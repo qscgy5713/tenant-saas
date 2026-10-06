@@ -9,10 +9,10 @@ import {
   formatDayLong,
   formatMonthSpan,
   formatTime,
-  todayYmd,
   tzLabel,
   weekdayShort,
 } from '../lib/time'
+import { useToday } from '../lib/useToday'
 import { ChevronLeftIcon, ChevronRightIcon } from './Icons'
 import { ErrorState, Loading } from './States'
 
@@ -28,8 +28,22 @@ interface Props {
   onSelect: (option: TimeOption) => void
 }
 
-export function SlotPicker({ source, timezone, selectedStart, onSelect }: Props) {
-  const today = todayYmd(timezone)
+/**
+ * 頁面與日期都是「相對於今天」的第幾頁,所以跨過午夜時整個元件重新來過(以 `today` 當 key):
+ * 否則日期列會悄悄往後移一天,而使用者選的頁數不變。
+ */
+export function SlotPicker(props: Props) {
+  const { today } = useToday(props.timezone)
+  return <SlotPickerInner key={today} today={today} {...props} />
+}
+
+function SlotPickerInner({
+  today,
+  source,
+  timezone,
+  selectedStart,
+  onSelect,
+}: Props & { today: string }) {
   // 使用者主動翻頁 / 點選日期之前,頁面與日期都由資料推導(預設跳到最早有空的那天)
   const [userPage, setUserPage] = useState<number | null>(null)
   const [userDay, setUserDay] = useState<string | null>(null)

@@ -304,6 +304,9 @@ async fn create_booking(
     let ctx = booking::mail_ctx(&mut tx, created.id).await?;
     let link = mail::booking_link(&state.public_base_url, &created.token);
     let email = mail::verification(&ctx.view(), &link);
+    // 收件者是任何人都能填的 Email:限制它每小時能收幾封(跨店家),免得被拿來騷擾別人的信箱
+    outbox::ensure_recipient_quota(&mut tx, &email.to, state.max_mails_per_recipient_per_hour)
+        .await?;
     outbox::enqueue(
         &mut tx,
         tenant_id,
@@ -400,10 +403,18 @@ async fn resend_verification(
 
     let ctx = booking::mail_ctx(&mut tx, id).await?;
     let link = mail::booking_link(&state.public_base_url, &raw);
+    let email = mail::verification(&ctx.view(), &link);
+    // 超過上限就當作不寄(與其他「不寄」的情況一樣回相同的回應,不洩漏預約是否存在)
+    if outbox::ensure_recipient_quota(&mut tx, &email.to, state.max_mails_per_recipient_per_hour)
+        .await
+        .is_err()
+    {
+        return Ok(reply());
+    }
     outbox::enqueue(
         &mut tx,
         tenant_id,
-        &mail::verification(&ctx.view(), &link),
+        &email,
         Some(&format!("verify:{id}:{}", resends + 1)),
     )
     .await?;

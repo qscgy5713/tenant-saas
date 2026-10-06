@@ -98,6 +98,14 @@ export interface TimeOff {
   reason: string | null
 }
 
+/** 休假清單的一頁。`has_more` 為 true 時後面還有 */
+export interface TimeOffPage {
+  items: TimeOff[]
+  limit: number
+  offset: number
+  has_more: boolean
+}
+
 export interface AuditEntry {
   id: number
   created_at: string

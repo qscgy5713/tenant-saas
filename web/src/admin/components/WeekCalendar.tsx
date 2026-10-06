@@ -8,7 +8,8 @@ import {
   weekDays,
   type PlacedBlock,
 } from '../../lib/calendar'
-import { formatTime, todayYmd, weekdayShort, dayOfMonth } from '../../lib/time'
+import { formatTime, weekdayShort, dayOfMonth } from '../../lib/time'
+import { useToday } from '../../lib/useToday'
 import { STATUS_LABEL } from '../labels'
 import type { AdminBooking } from '../types'
 
@@ -38,7 +39,7 @@ export function WeekCalendar({
   const [overDay, setOverDay] = useState<string | null>(null)
 
   const days = useMemo(() => weekDays(date), [date])
-  const today = todayYmd(tz)
+  const { today } = useToday(tz)
   const shown = useMemo(() => bookings.filter((b) => b.status !== 'cancelled'), [bookings])
   const [startHour, endHour] = useMemo(() => hourWindow(shown, days, tz), [shown, days, tz])
   const hours = endHour - startHour

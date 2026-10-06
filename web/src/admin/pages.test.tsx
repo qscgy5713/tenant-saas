@@ -1,4 +1,4 @@
-import { createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -146,6 +146,50 @@ describe('各角色看到的選單與頁面', () => {
     renderApp('/admin/demo-salon')
     expect(await screen.findByText('找不到這家店')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '回到我的店家' })).toBeInTheDocument()
+  })
+})
+
+describe('頁面開著跨過午夜(櫃檯的平板整夜不關)', () => {
+  beforeEach(() => mockShopMe('owner'))
+  // 凍結在台北 10/5 10:00;「過了午夜」= 時間來到台北 10/6 00:30,再讓視窗取得焦點(休眠醒來 / 切回分頁)
+  const pastMidnight = () =>
+    act(() => {
+      vi.setSystemTime(new Date('2026-10-05T16:30:00Z'))
+      window.dispatchEvent(new Event('focus'))
+    })
+
+  it('總覽:「今天的行程」換成新的一天,而且用新的一天重新查詢', async () => {
+    const froms: (string | null)[] = []
+    server.use(
+      http.get(`${API}/t/demo-salon/bookings`, ({ request }) => {
+        froms.push(new URL(request.url).searchParams.get('from'))
+        return HttpResponse.json({ items: [], limit: 100, offset: 0 })
+      }),
+    )
+    renderApp('/admin/demo-salon')
+    expect(await screen.findByText(/10月5日/)).toBeInTheDocument()
+    expect(froms).toContain('2026-10-04T16:00:00.000Z') // 10/5 的 00:00(台北)
+
+    pastMidnight()
+    expect(await screen.findByText(/10月6日/)).toBeInTheDocument()
+    expect(screen.queryByText(/10月5日/)).not.toBeInTheDocument()
+    await waitFor(() => expect(froms).toContain('2026-10-05T16:00:00.000Z')) // 10/6 的 00:00
+  })
+
+  it('預約頁:沒指定日期時跟著「今天」走;自己選過日期就不會被拉走', async () => {
+    mockBookings([])
+    const { unmount } = renderApp('/admin/demo-salon/bookings')
+    expect(await screen.findByLabelText('日期')).toHaveValue('2026-10-05')
+    pastMidnight()
+    await waitFor(() => expect(screen.getByLabelText('日期')).toHaveValue('2026-10-06'))
+    unmount()
+
+    vi.setSystemTime(new Date('2026-10-05T02:00:00Z'))
+    renderApp('/admin/demo-salon/bookings?date=2026-10-05')
+    expect(await screen.findByLabelText('日期')).toHaveValue('2026-10-05')
+    pastMidnight()
+    await screen.findByText('這一天沒有預約。')
+    expect(screen.getByLabelText('日期')).toHaveValue('2026-10-05')
   })
 })
 

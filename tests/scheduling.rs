@@ -387,13 +387,16 @@ async fn working_hours(pool: PgPool) {
 async fn time_off(pool: PgPool) {
     let (app, owner, staff, owner_id, staff_id) = setup(pool.clone()).await;
     let own = format!("/t/shop-a/members/{staff_id}/time-off");
-    let range = json!({"starts_at": "2026-12-24T00:00:00Z", "ends_at": "2026-12-26T00:00:00Z", "reason": "旅行"});
+    // 相對於現在的日期,不能寫死(寫死的日期過了就會變成「已結束」的休假)
+    let from = chrono::Utc::now() + chrono::Duration::days(30);
+    let range =
+        json!({"starts_at": from, "ends_at": from + chrono::Duration::days(2), "reason": "旅行"});
 
     let (status, created) = call(&app, Method::POST, &own, Some(range.clone()), Some(&staff)).await;
     assert_eq!(status, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap();
 
-    let bad = json!({"starts_at": "2026-12-26T00:00:00Z", "ends_at": "2026-12-24T00:00:00Z"});
+    let bad = json!({"starts_at": from + chrono::Duration::days(2), "ends_at": from});
     assert_eq!(
         call(&app, Method::POST, &own, Some(bad), Some(&staff))
             .await
@@ -431,17 +434,17 @@ async fn time_off(pool: PgPool) {
     );
 
     let (_, list) = call(&app, Method::GET, &own, None, Some(&staff)).await;
-    assert_eq!(list.as_array().unwrap().len(), 1);
-    assert_eq!(list[0]["reason"], "旅行", "本人看得到自己的原因");
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    assert_eq!(list["items"][0]["reason"], "旅行", "本人看得到自己的原因");
 
     // 同事(非主管)只看得到時段,看不到原因;主管看得到
     let coworker = signup(&app, "d@example.com").await;
     add_member(&pool, "shop-a", "d@example.com", "staff").await;
     let (_, seen) = call(&app, Method::GET, &own, None, Some(&coworker)).await;
-    assert_eq!(seen.as_array().unwrap().len(), 1);
-    assert!(seen[0]["reason"].is_null());
+    assert_eq!(seen["items"].as_array().unwrap().len(), 1);
+    assert!(seen["items"][0]["reason"].is_null());
     let (_, seen) = call(&app, Method::GET, &own, None, Some(&owner)).await;
-    assert_eq!(seen[0]["reason"], "旅行");
+    assert_eq!(seen["items"][0]["reason"], "旅行");
     assert_eq!(
         call(
             &app,
@@ -466,4 +469,123 @@ async fn time_off(pool: PgPool) {
         .0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[sqlx::test]
+async fn time_off_list_is_paged_and_splits_upcoming_from_past(pool: PgPool) {
+    let (app, owner, _staff, owner_id, _staff_id) = setup(pool.clone()).await;
+    let uri = format!("/t/shop-a/members/{owner_id}/time-off");
+    let now = chrono::Utc::now();
+    let day = |n: i64| now + chrono::Duration::days(n);
+    let add = |from: chrono::DateTime<chrono::Utc>, reason: &'static str| {
+        let (app, owner, uri) = (app.clone(), owner.clone(), uri.clone());
+        async move {
+            let (status, _) = call(
+                &app,
+                Method::POST,
+                &uri,
+                Some(json!({"starts_at": from, "ends_at": from + chrono::Duration::hours(2), "reason": reason})),
+                Some(&owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED);
+        }
+    };
+    // 7 筆未來的(順序故意打亂)
+    for n in [5, 3, 7, 1, 6, 2, 4] {
+        add(day(n), "future").await;
+    }
+    // 直接寫入已結束的休假(API 不允許建立過去的):3 筆,結束時間不同
+    for (i, ago) in [10, 20, 30].into_iter().enumerate() {
+        sqlx::query("INSERT INTO time_off (tenant_id, user_id, starts_at, ends_at, reason) SELECT tenant_id, user_id, now() - make_interval(days => $1) - interval '2 hours', now() - make_interval(days => $1), $2 FROM memberships WHERE user_id = $3")
+            .bind(ago)
+            .bind(format!("past-{i}"))
+            .bind(owner_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let get = |q: &str| {
+        let (app, owner, uri) = (app.clone(), owner.clone(), format!("{uri}{q}"));
+        async move { call(&app, Method::GET, &uri, None, Some(&owner)).await }
+    };
+    let starts = |page: &serde_json::Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["starts_at"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // 預設只列還沒結束的,依開始時間排序;分頁用 has_more 告訴你後面還有沒有
+    let (status, p1) = get("?limit=3").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (
+            p1["items"].as_array().unwrap().len(),
+            p1["has_more"].clone()
+        ),
+        (3, json!(true))
+    );
+    let (_, p2) = get("?limit=3&offset=3").await;
+    assert_eq!(
+        (
+            p2["items"].as_array().unwrap().len(),
+            p2["has_more"].clone()
+        ),
+        (3, json!(true))
+    );
+    let (_, p3) = get("?limit=3&offset=6").await;
+    assert_eq!(
+        (
+            p3["items"].as_array().unwrap().len(),
+            p3["has_more"].clone()
+        ),
+        (1, json!(false))
+    );
+    let mut all: Vec<String> = [starts(&p1), starts(&p2), starts(&p3)].concat();
+    let sorted = {
+        let mut s = all.clone();
+        s.sort();
+        s
+    };
+    assert_eq!(all, sorted, "跨頁依開始時間排序");
+    all.dedup();
+    assert_eq!(all.len(), 7, "每筆恰好出現一次,沒有過去的");
+    // 剛好整頁、後面沒有 → has_more 必須是 false(不是「這頁滿了所以也許還有」)
+    let (_, exact) = get("?limit=7").await;
+    assert_eq!(
+        (
+            exact["items"].as_array().unwrap().len(),
+            exact["has_more"].clone()
+        ),
+        (7, json!(false))
+    );
+
+    // 看已結束的:最近結束的在前
+    let (_, past) = get("?past=true").await;
+    let reasons: Vec<&str> = past["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(reasons, ["past-0", "past-1", "past-2"]);
+    assert_eq!(past["has_more"], false);
+
+    // 進行中的(已開始、還沒結束)算「未結束」
+    sqlx::query("INSERT INTO time_off (tenant_id, user_id, starts_at, ends_at, reason) SELECT tenant_id, user_id, now() - interval '1 hour', now() + interval '1 hour', 'ongoing' FROM memberships WHERE user_id = $1")
+        .bind(owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, upcoming) = get("?limit=1").await;
+    assert_eq!(upcoming["items"][0]["reason"], "ongoing");
+
+    // 參數會被夾到合理範圍,不會出錯
+    assert_eq!(get("?limit=0").await.1["limit"], 1);
+    assert_eq!(get("?limit=100000").await.1["limit"], 100);
+    assert_eq!(get("?offset=-5").await.1["offset"], 0);
 }

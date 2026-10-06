@@ -143,6 +143,8 @@ async fn create(
     let mail_ctx = booking::mail_ctx(&mut tx, created.id).await?;
     let link = mail::booking_link(&state.public_base_url, &created.token);
     let email = mail::confirmed(&mail_ctx.view(), &link);
+    outbox::ensure_recipient_quota(&mut tx, &email.to, state.max_mails_per_recipient_per_hour)
+        .await?;
     outbox::enqueue(
         &mut tx,
         ctx.tenant_id,

@@ -277,6 +277,138 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         StatusCode::OK
     );
 
+    // 3b. 「沒有租戶上下文時寫信」的 SECURITY DEFINER 函式。
+    // 它們寫入 FORCE RLS 的 email_outbox;一般測試用超級使用者連線會繞過 RLS,看不出問題。
+    // (曾經:忘記密碼 500、帳號鎖定第 5 次拋錯所以永遠鎖不住、付款失敗通知 webhook 500。)
+    let mail_of = |memory: &MemoryMailer, to: &str, subject: &str| {
+        memory
+            .sent()
+            .into_iter()
+            .find(|m| m.to == to && m.subject.contains(subject))
+    };
+    let memory = MemoryMailer::new();
+    let mailer = Mailer::Memory(memory.clone());
+
+    // 忘記密碼(request_password_reset)→ 重設(reset_password)
+    let victim = format!("victim-{unique}@example.com");
+    signup(&app, &victim).await;
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/auth/forgot-password",
+        Some(json!({"email": victim})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "忘記密碼要能在受限帳號下運作");
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    let reset_mail = mail_of(&memory, &victim, "重設您的密碼").expect("重設密碼信要寄出");
+    let reset_token: String = reset_mail
+        .body
+        .split("/admin/reset#token=")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take(64)
+        .collect();
+
+    // 帳號鎖定(login_failed):連續 5 次失敗 → 鎖定 + 通知信;鎖定中連正確密碼都不收
+    let login = |password: &'static str| {
+        let (app, victim) = (app.clone(), victim.clone());
+        async move {
+            call(
+                &app,
+                Method::POST,
+                "/auth/login",
+                Some(json!({"email": victim, "password": password})),
+                None,
+            )
+            .await
+            .0
+        }
+    };
+    for i in 1..=5 {
+        assert_eq!(
+            login("wrong-password").await,
+            StatusCode::UNAUTHORIZED,
+            "第 {i} 次失敗必須是 401(不是 500)"
+        );
+    }
+    assert_eq!(
+        login("password123").await,
+        StatusCode::UNAUTHORIZED,
+        "鎖定中連正確密碼都不收(受限帳號下鎖得住)"
+    );
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    assert!(
+        mail_of(&memory, &victim, "暫時鎖定").is_some(),
+        "鎖定通知信要寄出"
+    );
+
+    // 重設密碼 → 解鎖,新密碼可以登入
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        "/auth/reset-password",
+        Some(json!({"token": reset_token, "password": "brand-new-password-9"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        call(
+            &app,
+            Method::POST,
+            "/auth/login",
+            Some(json!({"email": victim, "password": "brand-new-password-9"})),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // 付款失敗通知(billing_payment_failed):先綁一個 Stripe 客戶,再模擬 webhook 呼叫函式
+    let tenant_id: Uuid = {
+        let mut tx = tenant_saas::db::begin_scoped(&pool, Some(owner_uuid(&me)), None)
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar("SELECT id FROM tenants WHERE slug = $1")
+            .bind(&slug)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        id
+    };
+    {
+        let mut tx = tenant_saas::db::begin_scoped(&pool, Some(owner_uuid(&me)), Some(tenant_id))
+            .await
+            .unwrap();
+        sqlx::query("SELECT billing_attach_customer($1)")
+            .bind(format!("cus_{unique}"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let result: String = sqlx::query_scalar(
+        "SELECT billing_payment_failed($1, 'invoice.payment_failed', $2, 'in_1', 1, NULL, $3, $4)",
+    )
+    .bind(format!("evt_{unique}"))
+    .bind(format!("cus_{unique}"))
+    .bind("「{shop}」扣款失敗")
+    .bind("請到 {slug} 更新信用卡")
+    .fetch_one(&pool)
+    .await
+    .expect("付款失敗通知要能在受限帳號下寫入信件佇列");
+    assert_eq!(result, "applied");
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    assert!(
+        mail_of(&memory, &format!("owner-{unique}@example.com"), "扣款失敗").is_some(),
+        "店主要收到付款失敗通知"
+    );
+
     // 4. 隔離在受限帳號下仍然成立:別家店的人看不到這家店
     let other = signup(&app, &format!("other-{unique}@example.com")).await;
     assert_eq!(
@@ -303,4 +435,8 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         .0,
         StatusCode::NOT_FOUND
     );
+}
+
+fn owner_uuid(me: &Value) -> Uuid {
+    me["id"].as_str().unwrap().parse().unwrap()
 }

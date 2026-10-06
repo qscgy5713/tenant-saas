@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get},
 };
@@ -261,29 +261,67 @@ struct TimeOff {
     reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TimeOffQuery {
+    /// true = 看已經結束的(最近結束的在前);預設只列還沒結束的(進行中與未來),照開始時間排序
+    past: Option<bool>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TimeOffPage {
+    items: Vec<TimeOff>,
+    limit: i64,
+    offset: i64,
+    /// 後面還有沒有。多抓一筆來判斷,不必另外 count
+    has_more: bool,
+}
+
 async fn list_time_off(
     State(state): State<AppState>,
     ctx: TenantCtx,
     Path((_slug, user_id)): Path<(String, Uuid)>,
-) -> Result<Json<Vec<TimeOff>>, AppError> {
+    Query(q): Query<TimeOffQuery>,
+) -> Result<Json<TimeOffPage>, AppError> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 100);
+    let offset = q.offset.unwrap_or(0).max(0);
     let mut tx = ctx.begin(&state).await?;
     ensure_member(&mut tx, user_id).await?;
-    let rows = sqlx::query_as::<_, TimeOff>(
-        "SELECT id, user_id, starts_at, ends_at, reason FROM time_off
-         WHERE user_id = $1 ORDER BY starts_at LIMIT 500",
-    )
+    // 兩條固定的 SQL(sqlx 不接受動態拼接的字串)
+    let mut rows = if q.past.unwrap_or(false) {
+        sqlx::query_as::<_, TimeOff>(
+            "SELECT id, user_id, starts_at, ends_at, reason FROM time_off
+             WHERE user_id = $1 AND ends_at <= now()
+             ORDER BY ends_at DESC, id LIMIT $2 OFFSET $3",
+        )
+    } else {
+        sqlx::query_as::<_, TimeOff>(
+            "SELECT id, user_id, starts_at, ends_at, reason FROM time_off
+             WHERE user_id = $1 AND ends_at > now()
+             ORDER BY starts_at, id LIMIT $2 OFFSET $3",
+        )
+    }
     .bind(user_id)
+    .bind(limit + 1)
+    .bind(offset)
     .fetch_all(&mut *tx)
     .await?;
     tx.rollback().await?;
+    let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     // 休假原因可能涉及隱私(例如就醫),只有主管與本人看得到
-    let mut rows = rows;
     if ctx.require_manager_or_self(user_id).is_err() {
         for row in &mut rows {
             row.reason = None;
         }
     }
-    Ok(Json(rows))
+    Ok(Json(TimeOffPage {
+        items: rows,
+        limit,
+        offset,
+        has_more,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

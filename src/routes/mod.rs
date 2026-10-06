@@ -39,6 +39,7 @@ pub struct AppState {
     pub public_base_url: String,
     pub cookie: crate::session::CookieConfig,
     pub max_shops_per_user: u32,
+    pub max_mails_per_recipient_per_hour: u32,
     pub metrics: Option<PrometheusHandle>,
     pub metrics_token: Option<String>,
     /// 沒設定 Stripe 時為 None:計費端點回 501,前端不顯示升級按鈕
@@ -62,6 +63,7 @@ impl AppState {
             public_base_url: config.public_base_url.clone(),
             cookie: crate::session::CookieConfig::new(config),
             max_shops_per_user: config.max_shops_per_user,
+            max_mails_per_recipient_per_hour: config.max_mails_per_recipient_per_hour,
             metrics: None,
             metrics_token: config.metrics_token.clone(),
             stripe: config
@@ -131,6 +133,10 @@ pub fn router(state: AppState) -> Router {
         state.clone(),
         rate_limit_auth,
     ));
+    let accept = members::accept_routes().layer(middleware::from_fn_with_state(
+        state.clone(),
+        rate_limit_auth,
+    ));
     let public = public::routes().layer(middleware::from_fn_with_state(
         state.clone(),
         rate_limit_public,
@@ -141,6 +147,7 @@ pub fn router(state: AppState) -> Router {
         .merge(credentials)
         .merge(tenants::routes())
         .merge(members::routes())
+        .merge(accept)
         .merge(services::routes())
         .merge(scheduling::routes())
         .merge(bookings::routes())

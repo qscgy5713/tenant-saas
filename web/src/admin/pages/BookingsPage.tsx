@@ -3,7 +3,8 @@ import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Loading, ErrorState, Notice } from '../../components/States'
 import { ChevronLeftIcon, ChevronRightIcon, PlusIcon } from '../../components/Icons'
-import { addDays, dayRange, formatDayLong, todayYmd } from '../../lib/time'
+import { addDays, dayRange, formatDayLong } from '../../lib/time'
+import { useToday } from '../../lib/useToday'
 import { BookingRow } from '../components/BookingRow'
 import { NewBookingModal } from '../components/NewBookingModal'
 import { MonthCalendar } from '../components/MonthCalendar'
@@ -48,11 +49,9 @@ export function BookingsPage() {
   const [flash, setFlash] = useState<string | null>(null)
   const [pickedId, setPickedId] = useState<string | null>(null)
   const [move, setMove] = useState<Move | null>(null)
-  // 「現在」在這個頁面停留期間固定,避免查詢條件每次渲染都變、一直重新請求
-  const [now] = useState(() => new Date())
-
   const tz = shop.timezone
-  const today = todayYmd(tz, now)
+  // 「現在」在同一天內固定(避免查詢條件每次渲染都變、一直重新請求),跨過午夜才會更新
+  const { today, now } = useToday(tz)
   const view: View = (VIEWS.find((v) => v.value === params.get('view'))?.value ?? 'day') as View
   const dateParam = params.get('date')
   const date = isYmd(dateParam) ? dateParam : today

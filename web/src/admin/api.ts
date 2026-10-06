@@ -18,6 +18,7 @@ import type {
   Role,
   ServicePage,
   TimeOff,
+  TimeOffPage,
   User,
   WorkingHour,
 } from './types'
@@ -185,8 +186,15 @@ export const putWorkingHours = (slug: string, userId: string, hours: WorkingHour
     send('PUT', { hours }),
   )
 
-export const listTimeOff = (slug: string, userId: string) =>
-  call<TimeOff[]>(`/t/${enc(slug)}/members/${enc(userId)}/time-off`)
+/** 預設只列還沒結束的(進行中與未來);`past` 看已結束的(最近結束的在前) */
+export const listTimeOff = (
+  slug: string,
+  userId: string,
+  q: { past?: boolean; offset?: number; limit?: number } = {},
+) =>
+  call<TimeOffPage>(
+    `/t/${enc(slug)}/members/${enc(userId)}/time-off${query({ past: q.past ? 'true' : undefined, offset: q.offset, limit: q.limit })}`,
+  )
 
 export const createTimeOff = (
   slug: string,

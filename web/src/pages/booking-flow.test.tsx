@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { freezeNow } from '../test/freeze'
 import { renderApp } from '../test/render'
 import {
@@ -68,6 +68,52 @@ describe('選日期與時間', () => {
     expect(monday).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: '10:00' })).toBeInTheDocument()
     expect(screen.getByText(/GMT\+8/)).toBeInTheDocument()
+  })
+
+  it('頁面開著跨過午夜 → 日期列改從新的「今天」開始,舊的一天消失(不會讓人選到已經過去的日子)', async () => {
+    mockShop()
+    renderApp(BOOK)
+    const strip = () => screen.getByRole('group', { name: '日期' })
+    await screen.findByRole('button', { name: '10:00' })
+    expect(within(strip()).getByRole('button', { name: /10月5日\s?週一/ })).toBeInTheDocument()
+
+    // 台北 10/6 00:30:休眠醒來 / 切回分頁
+    act(() => {
+      vi.setSystemTime(new Date('2026-10-05T16:30:00Z'))
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() =>
+      expect(within(strip()).queryByRole('button', { name: /10月5日/ })).not.toBeInTheDocument(),
+    )
+    expect(await within(strip()).findByRole('button', { name: /10月6日\s?週二/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(await screen.findByRole('button', { name: '10:00' })).toBeInTheDocument()
+  })
+
+  it('使用者已經翻到後面幾週 / 選了某一天,這時跨過午夜 → 回到從新的「今天」開始(翻頁數是相對於今天的)', async () => {
+    mockShop()
+    renderApp(BOOK)
+    const strip = () => screen.getByRole('group', { name: '日期' })
+    const user = userEvent.setup()
+    await screen.findByRole('button', { name: '10:00' })
+
+    // 翻到下一週:日期列從 10/12 開始
+    await user.click(screen.getByRole('button', { name: '下一週' }))
+    expect(await within(strip()).findByRole('button', { name: /10月12日/ })).toBeInTheDocument()
+    expect(within(strip()).queryByRole('button', { name: /10月5日/ })).not.toBeInTheDocument()
+
+    // 跨過午夜:如果頁數(1)原封不動,新的「今天」是 10/6,下一週會變成 10/13。
+    // 正確的是整個重來:回到第一頁,從 10/6 開始
+    act(() => {
+      vi.setSystemTime(new Date('2026-10-05T16:30:00Z'))
+      window.dispatchEvent(new Event('focus'))
+    })
+    expect(
+      await within(strip()).findByRole('button', { name: /10月6日\s?週二/ }),
+    ).toBeInTheDocument()
+    expect(within(strip()).queryByRole('button', { name: /10月13日/ })).not.toBeInTheDocument()
   })
 
   it('時段載入期間,日期是中性狀態,不能先被當成「沒有空檔」', async () => {

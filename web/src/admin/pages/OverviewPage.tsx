@@ -3,7 +3,8 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CopyIcon, ExternalLinkIcon, PlusIcon } from '../../components/Icons'
 import { ErrorState, Loading, Notice } from '../../components/States'
-import { dayRange, formatDayLong, todayYmd } from '../../lib/time'
+import { dayRange, formatDayLong } from '../../lib/time'
+import { useToday } from '../../lib/useToday'
 import { getPlan } from '../api'
 import { BookingRow } from '../components/BookingRow'
 import { NewBookingModal } from '../components/NewBookingModal'
@@ -16,10 +17,9 @@ export function OverviewPage() {
   const [creating, setCreating] = useState(false)
   const [flash, setFlash] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  const [now] = useState(() => new Date())
-
   const tz = shop.timezone
-  const today = todayYmd(tz, now)
+  // 頁面整夜開著也會跟著換日(櫃檯的平板),不會隔天還顯示昨天的行程
+  const { today, now } = useToday(tz)
   const range = dayRange(today, tz)
 
   const todays = useBookings(slug, { ...range, limit: 100 })

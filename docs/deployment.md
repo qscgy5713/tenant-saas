@@ -107,6 +107,7 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 | `WORKER_POLL_SECS` | | 5 | |
 | `PUBLIC_RATE_LIMIT_PER_MIN` | | 60 | 公開預約端點,每來源 |
 | `AUTH_RATE_LIMIT_PER_MIN` | | 10 | 註冊 / 登入,每來源 |
+| `MAX_MAILS_PER_RECIPIENT_PER_HOUR` | | 6 | 每位收件者每小時最多收幾封信(跨店家;防止拿別人的 Email 當收件者騷擾)。只套用在寄給外部指定收件者的信 |
 | `MAX_SHOPS_PER_USER` | | 5 | 每位使用者最多能「擁有」幾家店(防灌店家 / 占用代稱);受邀加入別人的店不算;0 視為設定錯誤 |
 | `TRUST_PROXY` | | false | 見下方「反向代理」 |
 | `STRIPE_SECRET_KEY` | | 空 = 不啟用 | 與 `STRIPE_WEBHOOK_SECRET` 必須同時設定,且至少一個 `STRIPE_PRICE_*`,否則拒絕啟動 |
