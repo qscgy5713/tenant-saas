@@ -7,13 +7,13 @@ import { ArrowRightIcon, LogOutIcon, PlusIcon } from '../../components/Icons'
 import { ErrorState, Loading, Notice } from '../../components/States'
 import { useTitle } from '../../lib/useTitle'
 import { validateName, validateSlug } from '../../lib/validate'
-import { createShop, listShops } from '../api'
-import { Modal } from '../components/Modal'
+import { createShop, listShops, resendVerification } from '../api'
+import { ConfirmDialog, Modal } from '../components/Modal'
 import { TextField } from '../components/AuthCard'
-import { useLogout } from '../logout'
+import { useLogout, useLogoutAll } from '../logout'
 import { TIMEZONES } from '../timezones'
 import { ROLE_LABEL } from '../ShopContext'
-import { useSession } from '../session'
+import { restoreSession, useSession } from '../session'
 
 export function ShopsPage() {
   useTitle('選擇店家 · 店家後台')
@@ -21,6 +21,9 @@ export function ShopsPage() {
   const logout = useLogout()
   const shops = useQuery({ queryKey: ['admin', 'shops'], queryFn: listShops })
   const [creating, setCreating] = useState(false)
+  const [signingOutAll, setSigningOutAll] = useState(false)
+  const logoutAll = useLogoutAll()
+  const logoutAllMutation = useMutation({ mutationFn: logoutAll })
 
   return (
     <div className="shops-page">
@@ -29,11 +32,22 @@ export function ShopsPage() {
           <h1>我的店家</h1>
           <p className="muted">你好,{session?.user.name}</p>
         </div>
-        <button type="button" className="btn btn-secondary" onClick={logout}>
-          <LogOutIcon width={16} height={16} />
-          登出
-        </button>
+        <div className="shops-head-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setSigningOutAll(true)}
+          >
+            登出所有裝置
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={logout}>
+            <LogOutIcon width={16} height={16} />
+            登出
+          </button>
+        </div>
       </header>
+
+      {session && !session.user.email_verified && <VerifyEmailNotice email={session.user.email} />}
 
       {shops.isPending && <Loading label="載入店家…" />}
       {shops.isError && <ErrorState error={shops.error} onRetry={() => shops.refetch()} />}
@@ -75,6 +89,61 @@ export function ShopsPage() {
       )}
 
       <CreateShopModal open={creating} onClose={() => setCreating(false)} />
+      <ConfirmDialog
+        open={signingOutAll}
+        title="登出所有裝置?"
+        message="包含這一台在內,所有裝置上的登入都會立刻失效,需要重新登入。懷疑帳號被別人用過時請這麼做(也建議一併更改密碼)。"
+        confirmLabel="登出所有裝置"
+        danger
+        pending={logoutAllMutation.isPending}
+        error={logoutAllMutation.isError ? '操作失敗,尚未登出,請再試一次。' : null}
+        onConfirm={() => logoutAllMutation.mutate()}
+        onClose={() => {
+          setSigningOutAll(false)
+          logoutAllMutation.reset()
+        }}
+      />
+    </div>
+  )
+}
+
+/** 還沒驗證 Email:提醒、可重寄,在別處點了連結後可以重新檢查 */
+function VerifyEmailNotice({ email }: { email: string }) {
+  const resend = useMutation({ mutationFn: resendVerification })
+  const recheck = useMutation({ mutationFn: restoreSession })
+  return (
+    <div className="notice notice-warning verify-notice" role="status">
+      <p>
+        <strong>請驗證你的 Email。</strong>驗證信已寄到 {email},點信中的連結後才能建立店家。
+      </p>
+      {resend.isSuccess && <p>{resend.data.message}</p>}
+      {resend.isError && (
+        <p role="alert">
+          {resend.error instanceof ApiError && resend.error.status === 429
+            ? '這個小時已經寄了太多封,請稍後再試。'
+            : resend.error instanceof ApiError
+              ? resend.error.message
+              : '寄送失敗,請再試一次。'}
+        </p>
+      )}
+      <div className="verify-notice-actions">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={resend.isPending}
+          onClick={() => resend.mutate()}
+        >
+          重新寄送驗證信
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={recheck.isPending}
+          onClick={() => recheck.mutate()}
+        >
+          我已驗證,重新檢查
+        </button>
+      </div>
     </div>
   )
 }

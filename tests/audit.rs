@@ -510,7 +510,15 @@ async fn customer_actions_are_audited_with_customer_as_actor(pool: PgPool) {
 
     let req = request(&s, start, "c@example.com").await;
     tick(&pool, &mailer, "http://app.test").await.unwrap();
-    let token = token_in(&memory.sent()[0].body);
+    // 註冊也會寄驗證信,所以不能拿「第一封」:要找寄給顧客的那封
+    let token = token_in(
+        &memory
+            .sent()
+            .into_iter()
+            .find(|m| m.to == "c@example.com")
+            .unwrap()
+            .body,
+    );
     let id = req["id"].as_str().unwrap();
 
     call(

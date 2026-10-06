@@ -7,6 +7,8 @@ export interface User {
   id: string
   email: string
   name: string
+  /** 沒驗證 Email 不能建立店家 */
+  email_verified: boolean
 }
 
 /** 登入 / 註冊的回應。後端也會在 body 附上 token(給非瀏覽器客戶端),網頁刻意不使用,只靠 cookie */

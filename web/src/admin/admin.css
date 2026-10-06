@@ -96,6 +96,19 @@
   gap: 12px;
 }
 
+.shops-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.verify-notice p {
+  margin: 0 0 8px;
+}
+.verify-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .shops-head h1 {
   font-size: 1.6rem;
 }

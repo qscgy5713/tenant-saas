@@ -54,6 +54,9 @@ impl JwtKeys {
     }
 }
 
+/// (上次改密碼, 上次「登出所有裝置」)
+type Cutoffs = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: Uuid,
@@ -99,17 +102,23 @@ impl FromRequestParts<AppState> for AuthUser {
         // JWT 本身無法撤銷。每次多查一次主鍵:使用者還在嗎?簽發時間有沒有早於上次改密碼?
         // 重設密碼後,舊的(可能被盜的)登入因此立刻失效;被刪除的使用者的 token 也不再有效。
         // 精度:簽發時間只到秒,改密碼後同一秒內簽發的舊 token 不會被擋(約 1 秒的窗口)。
-        let changed: Option<Option<DateTime<Utc>>> =
-            sqlx::query_scalar("SELECT password_changed_at FROM users WHERE id = $1")
-                .bind(claims.sub)
-                .fetch_optional(&state.db)
-                .await?;
-        match changed {
-            None => return Err(AppError::Unauthorized),
-            Some(Some(at)) if (claims.iat as i64) < at.timestamp() => {
-                return Err(AppError::Unauthorized);
-            }
-            Some(_) => {}
+        // 「登出所有裝置」(sessions_revoked_at)同理,但**同一秒內簽發的也拒絕**:撤銷要寧可多擋,
+        // 不能留下「撤銷的那一秒內簽發的 token 仍有效」的縫(代價:登出後 1 秒內立刻重新登入會被擋,重試即可)。
+        // 改密碼則維持「早於才拒絕」:重設密碼後馬上用新密碼登入是正常流程,不能擋。
+        let cutoffs: Option<Cutoffs> = sqlx::query_as(
+            "SELECT password_changed_at, sessions_revoked_at FROM users WHERE id = $1",
+        )
+        .bind(claims.sub)
+        .fetch_optional(&state.db)
+        .await?;
+        let Some((changed, revoked)) = cutoffs else {
+            return Err(AppError::Unauthorized);
+        };
+        let iat = claims.iat as i64;
+        if changed.is_some_and(|at| iat < at.timestamp())
+            || revoked.is_some_and(|at| iat <= at.timestamp())
+        {
+            return Err(AppError::Unauthorized);
         }
         Ok(AuthUser { id: claims.sub })
     }

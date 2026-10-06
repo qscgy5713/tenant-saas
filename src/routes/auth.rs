@@ -25,12 +25,15 @@ pub fn credential_routes() -> Router<AppState> {
         .route("/auth/login", post(login))
         .route("/auth/forgot-password", post(forgot_password))
         .route("/auth/reset-password", post(reset_password))
+        .route("/auth/verify-email", post(verify_email))
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth/me", get(me))
         .route("/auth/logout", post(logout))
+        .route("/auth/logout-all", post(logout_all))
+        .route("/auth/resend-verification", post(resend_verification))
 }
 
 /// 登入 / 註冊成功的回應:body 給非瀏覽器客戶端(Bearer),瀏覽器用 `Set-Cookie`。
@@ -82,6 +85,8 @@ struct UserResponse {
     id: Uuid,
     email: String,
     name: String,
+    /// 沒驗證 Email 就不能建立店家(其他功能不受影響)
+    email_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,12 +111,15 @@ async fn register(
 
     let password_hash = hash_password(req.password).await?;
     let result = sqlx::query_as::<_, UserResponse>(
-        "INSERT INTO users (email, password_hash, name) VALUES ($1, $2, $3)
-         RETURNING id, email::text AS email, name",
+        // 關掉驗證要求時(只有開發 / 測試能關),新使用者直接視為已驗證、也不寄驗證信
+        "INSERT INTO users (email, password_hash, name, email_verified_at)
+         VALUES ($1, $2, $3, CASE WHEN $4 THEN NULL ELSE now() END)
+         RETURNING id, email::text AS email, name, email_verified_at IS NOT NULL AS email_verified",
     )
     .bind(&email)
     .bind(&password_hash)
     .bind(&name)
+    .bind(state.require_verified_email)
     .fetch_one(&state.db)
     .await;
 
@@ -124,6 +132,13 @@ async fn register(
         }
         Err(err) => return Err(err.into()),
     };
+
+    // 驗證信寄不出去不該讓註冊失敗(使用者之後可以重寄),但要留下紀錄
+    if state.require_verified_email
+        && let Err(e) = send_verification(&state, user.id).await
+    {
+        tracing::error!(error = ?e, user_id = %user.id, "註冊後寫入驗證信失敗");
+    }
 
     let token = state.jwt.issue(user.id)?;
     Ok(with_session(
@@ -140,6 +155,7 @@ struct LoginRow {
     name: String,
     password_hash: String,
     locked: bool,
+    email_verified: bool,
 }
 
 /// 登入。帳號不存在、密碼錯誤、帳號鎖定中,對外一律是同一個 401(不洩漏哪些 Email 已註冊 / 是否被鎖);
@@ -152,7 +168,8 @@ async fn login(
     let email = req.email.trim();
     let row = sqlx::query_as::<_, LoginRow>(
         "SELECT id, email::text AS email, name, password_hash,
-                COALESCE(locked_until > now(), false) AS locked
+                COALESCE(locked_until > now(), false) AS locked,
+                email_verified_at IS NOT NULL AS email_verified
          FROM users WHERE email = $1::citext",
     )
     .bind(email)
@@ -198,6 +215,7 @@ async fn login(
                 id: row.id,
                 email: row.email,
                 name: row.name,
+                email_verified: row.email_verified,
             },
         },
     ))
@@ -205,7 +223,8 @@ async fn login(
 
 async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<UserResponse>, AppError> {
     sqlx::query_as::<_, UserResponse>(
-        "SELECT id, email::text AS email, name FROM users WHERE id = $1",
+        "SELECT id, email::text AS email, name, email_verified_at IS NOT NULL AS email_verified
+         FROM users WHERE id = $1",
     )
     .bind(auth.id)
     .fetch_optional(&state.db)
@@ -291,4 +310,88 @@ async fn reset_password(
         Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// 產生驗證 token、組信,交給資料庫函式決定要不要寄(已驗證 / 這小時寄太多次就不寄)
+async fn send_verification(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
+    let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    let raw = token::generate();
+    let link = mail::email_verification_link(&state.public_base_url, &raw);
+    let msg = mail::email_verification(&email, &link);
+    let result = sqlx::query_scalar("SELECT request_email_verification($1, $2, $3, $4)")
+        .bind(user_id)
+        .bind(token::hash(&raw))
+        .bind(&msg.subject)
+        .bind(&msg.body)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(result)
+}
+
+/// 重寄驗證信。已驗證回 409;這小時已寄 3 封回 429。
+async fn resend_verification(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    match send_verification(&state, auth.id).await?.as_str() {
+        "sent" => Ok((
+            StatusCode::ACCEPTED,
+            Json(Accepted {
+                message: "驗證信已寄出,請查看信箱(包含垃圾郵件匣)。",
+            }),
+        )),
+        "already_verified" => Err(AppError::Conflict("這個 Email 已經驗證過了".into())),
+        "throttled" => Err(AppError::TooManyRequests),
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyRequest {
+    token: String,
+}
+
+/// 用信中的 token 驗證 Email。**不需要登入**:使用者常在另一台裝置 / 另一個瀏覽器開信。
+/// token 無效、過期、已使用都是同一個錯誤。
+async fn verify_email(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyRequest>,
+) -> Result<Json<Accepted>, AppError> {
+    let token = req.token.trim();
+    let invalid = || AppError::BadRequest("驗證連結無效或已過期,請登入後重新寄送".into());
+    if !(16..=128).contains(&token.len()) {
+        return Err(invalid());
+    }
+    let result = sqlx::query_scalar::<_, Uuid>("SELECT verify_email($1)")
+        .bind(token::hash(token))
+        .fetch_one(&state.db)
+        .await;
+    match result {
+        Ok(_) => Ok(Json(Accepted {
+            message: "Email 已驗證,現在可以建立店家了。",
+        })),
+        Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// 登出所有裝置:這個時間點之前簽發的 token 全部失效(包含目前這個),並清掉這個瀏覽器的 cookie。
+async fn logout_all(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    sqlx::query("SELECT revoke_sessions($1)")
+        .bind(auth.id)
+        .execute(&state.db)
+        .await?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        AppendHeaders([
+            (header::SET_COOKIE, state.cookie.clear()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ]),
+    ))
 }

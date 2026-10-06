@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -353,5 +353,139 @@ describe('忘記密碼 / 重設密碼', () => {
     await user.click(screen.getByRole('button', { name: '更新密碼' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('已過期')
     expect(screen.getByRole('link', { name: '重新申請' })).toHaveAttribute('href', '/admin/forgot')
+  })
+})
+
+describe('Email 驗證', () => {
+  it('點信中的連結:token 從 # 讀取,送出一次,成功顯示後端訊息', async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.post(`${API}/auth/verify-email`, async ({ request }) => {
+        calls.push(await request.json())
+        return HttpResponse.json({ message: 'Email 已驗證,現在可以建立店家了。' })
+      }),
+    )
+    const token = 'c'.repeat(64)
+    renderApp(`/admin/verify#token=${token}`)
+    expect(await screen.findByText('Email 已驗證,現在可以建立店家了。')).toBeInTheDocument()
+    expect(calls).toEqual([{ token }]) // 只送一次:連結只能用一次
+    expect(screen.getByRole('link', { name: '前往後台' })).toHaveAttribute('href', '/admin')
+  })
+
+  it('開發模式(StrictMode,effect 跑兩次)下也只送一次:連結只能用一次,第二次會變成「已使用」', async () => {
+    let called = 0
+    server.use(
+      http.post(`${API}/auth/verify-email`, () => {
+        called += 1
+        return called === 1
+          ? HttpResponse.json({ message: 'Email 已驗證,現在可以建立店家了。' })
+          : error(400, '驗證連結無效或已過期,請登入後重新寄送')
+      }),
+    )
+    renderApp(`/admin/verify#token=${'e'.repeat(64)}`, { strict: true })
+    expect(await screen.findByText('Email 已驗證,現在可以建立店家了。')).toBeInTheDocument()
+    expect(called).toBe(1)
+  })
+
+  it('連結缺 token → 不送出、顯示無效;連結過期 → 顯示後端訊息', async () => {
+    let called = 0
+    server.use(
+      http.post(`${API}/auth/verify-email`, () => {
+        called += 1
+        return error(400, '驗證連結無效或已過期,請登入後重新寄送')
+      }),
+    )
+    const first = renderApp('/admin/verify')
+    expect(await screen.findByText(/驗證連結不完整/)).toBeInTheDocument()
+    expect(called).toBe(0)
+    first.unmount()
+
+    renderApp(`/admin/verify#token=${'d'.repeat(64)}`)
+    expect(await screen.findByRole('alert')).toHaveTextContent('已過期')
+  })
+
+  it('未驗證:店家列表顯示提醒,可重寄驗證信;已驗證不顯示', async () => {
+    loginAs({ ...USER, email_verified: false })
+    let resent = 0
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([])),
+      http.post(`${API}/auth/resend-verification`, () => {
+        resent += 1
+        return HttpResponse.json({ message: '驗證信已寄出,請查看信箱。' }, { status: 202 })
+      }),
+    )
+    const first = renderApp('/admin')
+    const user = userEvent.setup()
+    expect(await screen.findByText(/請驗證你的 Email/)).toBeInTheDocument()
+    expect(screen.getByText(/owner@demo.example.com/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '重新寄送驗證信' }))
+    expect(await screen.findByText('驗證信已寄出,請查看信箱。')).toBeInTheDocument()
+    expect(resent).toBe(1)
+    first.unmount()
+
+    loginAs(USER)
+    renderApp('/admin')
+    await screen.findByRole('heading', { name: '我的店家' })
+    expect(screen.queryByText(/請驗證你的 Email/)).not.toBeInTheDocument()
+  })
+
+  it('重寄太頻繁(429)→ 顯示稍後再試', async () => {
+    loginAs({ ...USER, email_verified: false })
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([])),
+      http.post(`${API}/auth/resend-verification`, () => error(429, '請求過於頻繁,請稍後再試')),
+    )
+    renderApp('/admin')
+    await userEvent.setup().click(await screen.findByRole('button', { name: '重新寄送驗證信' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('寄了太多封')
+  })
+
+  it('「我已驗證,重新檢查」:向後端重新確認,提醒消失', async () => {
+    loginAs({ ...USER, email_verified: false })
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([])),
+      http.get(`${API}/auth/me`, () => HttpResponse.json({ ...USER, email_verified: true })),
+    )
+    renderApp('/admin')
+    await userEvent.setup().click(await screen.findByRole('button', { name: '我已驗證,重新檢查' }))
+    await waitFor(() => expect(screen.queryByText(/請驗證你的 Email/)).not.toBeInTheDocument())
+  })
+})
+
+describe('登出所有裝置', () => {
+  it('確認後呼叫後端,成功才清除登入並回到登入頁', async () => {
+    loginAs()
+    let called = 0
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/logout-all`, () => {
+        called += 1
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '登出所有裝置' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(called).toBe(0) // 還沒確認
+    await user.click(within(dialog).getByRole('button', { name: '登出所有裝置' }))
+    expect(await screen.findByRole('heading', { name: '登入' })).toBeInTheDocument()
+    expect(called).toBe(1)
+    expect(getSession()).toBeNull()
+  })
+
+  it('後端失敗時不能假裝成功:仍在登入狀態,視窗顯示錯誤', async () => {
+    loginAs()
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/logout-all`, () => HttpResponse.error()),
+    )
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '登出所有裝置' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: '登出所有裝置' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('尚未登出')
+    expect(getSession()).not.toBeNull()
   })
 })

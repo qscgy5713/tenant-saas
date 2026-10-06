@@ -1,5 +1,15 @@
 import { expect, test } from '@playwright/test'
-import { API, PASSWORD, anonymousApi, createShop, loginViaUi, signIn, uniq } from './helpers'
+import {
+  API,
+  PASSWORD,
+  anonymousApi,
+  createShop,
+  linkIn,
+  loginViaUi,
+  signIn,
+  uniq,
+  waitForMail,
+} from './helpers'
 
 test('註冊 → 開店 → 登入憑證是 HttpOnly cookie → 重新整理仍登入 → 登出', async ({
   page,
@@ -15,8 +25,26 @@ test('註冊 → 開店 → 登入憑證是 HttpOnly cookie → 重新整理仍�
   await page.getByRole('button', { name: '建立帳號' }).click()
   await expect(page.getByRole('heading', { name: '我的店家' })).toBeVisible()
 
+  // 沒驗證 Email 不能開店:提醒 + 後端也擋(錯誤訊息說明怎麼辦)
+  await expect(page.getByText(/請驗證你的 Email/)).toBeVisible()
   await page.getByRole('button', { name: '建立店家' }).click()
   const dialog = page.getByRole('dialog')
+  await dialog.getByLabel('店家名稱').fill('我的第一家店')
+  await dialog.getByLabel(/預約頁網址代稱/).fill(slug)
+  await dialog.getByRole('button', { name: '建立店家' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('請先驗證 Email')
+  await dialog.getByRole('button', { name: '取消' }).click()
+
+  // 從信箱點驗證連結(在另一個分頁開,和真實使用一樣),回來按「重新檢查」
+  const mail = await waitForMail(context.request, email, '驗證')
+  const verifyPage = await context.newPage()
+  await verifyPage.goto(linkIn(mail, '/admin/verify'))
+  await expect(verifyPage.getByRole('heading', { name: 'Email 已驗證' })).toBeVisible()
+  await verifyPage.close()
+  await page.getByRole('button', { name: '我已驗證,重新檢查' }).click()
+  await expect(page.getByText(/請驗證你的 Email/)).toHaveCount(0)
+
+  await page.getByRole('button', { name: '建立店家' }).click()
   await dialog.getByLabel('店家名稱').fill('我的第一家店')
   await dialog.getByLabel(/預約頁網址代稱/).fill(slug)
   await dialog.getByRole('button', { name: '建立店家' }).click()
@@ -88,4 +116,34 @@ test('CSRF:帶著登入 cookie 的寫入請求,Origin 不對就被擋(走完整�
   const anonymous = await anonymousApi()
   expect((await anonymous.get(`${API}/auth/me`)).status()).toBe(401)
   await anonymous.dispose()
+})
+
+test('登出所有裝置:另一個瀏覽器的登入也立刻失效', async ({ page, browser, request }) => {
+  const shop = await createShop(request)
+
+  await signIn(page, shop.owner.email)
+  await page.goto('/admin')
+  await expect(page.getByRole('heading', { name: '我的店家' })).toBeVisible()
+
+  const otherContext = await browser.newContext()
+  const other = await otherContext.newPage()
+  await signIn(other, shop.owner.email)
+  await other.goto('/admin')
+  await expect(other.getByRole('heading', { name: '我的店家' })).toBeVisible()
+
+  // 簽發時間只到秒,撤銷「同一秒內」簽發的 token 也算失效,所以不必等
+  await page.getByRole('button', { name: '登出所有裝置' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '登出所有裝置' }).click()
+  await expect(page.getByRole('heading', { name: '登入' })).toBeVisible()
+
+  // 另一個瀏覽器重新整理後被登出
+  await other.reload()
+  await expect(other.getByRole('heading', { name: '登入' })).toBeVisible()
+  await otherContext.close()
+
+  // 重新登入可以正常使用(等到下一秒,避開撤銷同一秒的窗口)
+  await page.waitForTimeout(1100)
+  await signIn(page, shop.owner.email)
+  await page.goto('/admin')
+  await expect(page.getByRole('heading', { name: '我的店家' })).toBeVisible()
 })

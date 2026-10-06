@@ -13,6 +13,8 @@ pub enum AppError {
     Unauthorized,
     #[error("沒有權限執行此操作")]
     Forbidden,
+    #[error("請先驗證 Email 才能建立店家,驗證信已寄到您的信箱")]
+    EmailNotVerified,
     #[error("找不到資源")]
     NotFound,
     #[error("請求過於頻繁,請稍後再試")]
@@ -50,6 +52,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::EmailNotVerified => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             AppError::LimitReached(_) => StatusCode::PAYMENT_REQUIRED,

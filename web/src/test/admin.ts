@@ -3,7 +3,12 @@ import type { MyShop, Role, User } from '../admin/types'
 import { setSession } from '../admin/session'
 import { API, server } from './server'
 
-export const USER: User = { id: 'u-owner', email: 'owner@demo.example.com', name: '林美玲' }
+export const USER: User = {
+  id: 'u-owner',
+  email: 'owner@demo.example.com',
+  name: '林美玲',
+  email_verified: true,
+}
 
 /** 模擬「已登入」:登入靠 HttpOnly cookie,前端只記使用者是誰 */
 export function loginAs(user: User = USER) {

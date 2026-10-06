@@ -109,6 +109,7 @@ Migration 只往前、不回頭。要讓新舊版本能在滾動更新期間並�
 | `AUTH_RATE_LIMIT_PER_MIN` | | 10 | 註冊 / 登入,每來源 |
 | `MAX_MAILS_PER_RECIPIENT_PER_HOUR` | | 6 | 每位收件者每小時最多收幾封信(跨店家;防止拿別人的 Email 當收件者騷擾)。只套用在寄給外部指定收件者的信 |
 | `MAX_SHOPS_PER_USER` | | 5 | 每位使用者最多能「擁有」幾家店(防灌店家 / 占用代稱);受邀加入別人的店不算;0 視為設定錯誤 |
+| `REQUIRE_VERIFIED_EMAIL` | | true | 沒驗證 Email 的使用者不能建立店家。只有明確寫 `false` / `0` 才關,**production 設為 false 會拒絕啟動**(只給開發與測試) |
 | `TRUST_PROXY` | | false | 見下方「反向代理」 |
 | `STRIPE_SECRET_KEY` | | 空 = 不啟用 | 與 `STRIPE_WEBHOOK_SECRET` 必須同時設定,且至少一個 `STRIPE_PRICE_*`,否則拒絕啟動 |
 | `STRIPE_WEBHOOK_SECRET` | | — | Stripe Dashboard 的 webhook 簽署密鑰(`whsec_…`);webhook 網址 `https://<api>/webhooks/stripe`,訂閱事件 `customer.subscription.created/updated/deleted` 、`invoice.payment_failed`(付款失敗通知信)與 `invoice.paid`(付款恢復通知信;沒訂閱這兩個事件就不會寄) |
@@ -227,7 +228,7 @@ docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest
 - [x] **Stripe / 計費**:結帳、客戶入口、webhook、付款失敗通知已實作;**尚未用真實 Stripe 帳號驗證**。沒設定 `STRIPE_*` 時方案仍只能由營運人員改資料庫
 - [ ] 營運人員後台 / 平台超級管理員(跨租戶管理)
 - [x] 帳號鎖定(5 次 / 15 分鐘);告警建議:`account_locked_total` 突然升高代表有人在猜密碼
-- [ ] 註冊 Email 驗證、refresh token(JWT 目前只有單一短效 token,無法主動撤銷)
+- [x] 註冊 Email 驗證(沒驗證不能建立店家)、登出所有裝置。**不做 refresh token**:每個請求本來就查資料庫,改密碼 / 登出所有裝置都會立刻讓舊 token 失效(見 decisions)。缺的是「單一裝置登出」與「session 清單」
 - [ ] 稽核日誌歸檔、資料保留與刪除政策(個資法 / GDPR 的刪除請求流程)
 - [ ] 全域(跨實例)限流
 - [x] 告警規則檔(`deploy/alerts.yml`)

@@ -58,6 +58,16 @@ export const resetPassword = (token: string, password: string) =>
 
 export const getMe = () => call<User>('/auth/me')
 
+/** 用信中的連結驗證 Email(不需要登入:常在另一台裝置開信) */
+export const verifyEmail = (token: string) =>
+  api<{ message: string }>('/auth/verify-email', json({ token }))
+
+export const resendVerification = () =>
+  call<{ message: string }>('/auth/resend-verification', { method: 'POST' })
+
+/** 登出所有裝置:此刻之前簽發的登入全部失效,包含目前這個 */
+export const logoutAllRequest = () => api<void>('/auth/logout-all', { method: 'POST' })
+
 /** 清掉登入 cookie(前端的 JS 刪不掉 HttpOnly cookie) */
 export const logoutRequest = () => api<void>('/auth/logout', { method: 'POST' })
 

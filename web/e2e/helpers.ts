@@ -68,7 +68,20 @@ export async function register(
     null,
     { email, password: PASSWORD, name },
   )
+  // 沒驗證 Email 不能開店:走真實流程,從信箱(Mailpit)取出驗證連結再點
+  await verifyEmailViaMail(request, email)
   return { email, password: PASSWORD, name, id: r.user.id, token: r.token }
+}
+
+/** 信中驗證連結 `…/admin/verify#token=…` 的 token */
+export function verifyTokenIn(mail: Mail): string {
+  const link = linkIn(mail, '/admin/verify')
+  return link.split('#token=')[1]
+}
+
+export async function verifyEmailViaMail(request: APIRequestContext, email: string) {
+  const mail = await waitForMail(request, email, '驗證')
+  await call(request, 'POST', '/auth/verify-email', null, { token: verifyTokenIn(mail) })
 }
 
 export interface Shop {

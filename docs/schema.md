@@ -296,6 +296,9 @@ CREATE POLICY tenant_isolation ON services
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
 | `memberships.active` | 員工停用(離職):false 時進不了這家店、不出現在可預約名單、不佔方案名額;歷史預約保留。見 decisions「員工停用」 | tenant_app(經 `deactivate` / `reactivate` 端點) |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |
+| `users.email_verified_at` | 沒驗證不能建立店家。既有使用者上線前以註冊時間回填(視為已驗證)。證據:驗證信連結、重設密碼連結、接受寄到該 Email 的邀請 | 只能經 `verify_email` / `reset_password` / `accept_invitation`(SECURITY DEFINER) |
+| `users.sessions_revoked_at` | 「登出所有裝置」:簽發時間早於**或等於**它的 JWT 一律拒絕 | 只能經 `revoke_sessions` |
+| `email_verifications` | 驗證連結(只存 SHA-256、24 小時、一次性) | **只能經** `request_email_verification` / `verify_email`;每位使用者每小時最多 3 封 |
 | `users.failed_logins` / `last_failed_login_at` / `locked_until` | 帳號鎖定:5 次 / 15 分鐘;鎖定中不再計數、不延長;距上次失敗超過 15 分鐘重算 | **只能經** `login_failed` / `login_succeeded`(SECURITY DEFINER);`tenant_app` 讀不到 |
 | `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |
 | `password_resets` | token 雜湊、1 小時、單次;每帳號每小時最多 3 筆 | **只能經** `request_password_reset` / `reset_password`(SECURITY DEFINER,授權 runtime) |

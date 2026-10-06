@@ -86,6 +86,17 @@ async fn create_tenant(
         return Err(AppError::BadRequest("不支援的時區".into()));
     }
 
+    // 沒驗證 Email 不能開店(防止拿別人的 Email 註冊來占用網址代稱、以系統名義寄信)
+    let verified: bool =
+        sqlx::query_scalar("SELECT email_verified_at IS NOT NULL FROM users WHERE id = $1")
+            .bind(auth.id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+    if state.require_verified_email && !verified {
+        return Err(AppError::EmailNotVerified);
+    }
+
     let mut tx = begin_scoped(&state.db, Some(auth.id), None).await?;
     let result: Result<Uuid, sqlx::Error> =
         sqlx::query_scalar("SELECT create_tenant($1, $2, $3, $4)")

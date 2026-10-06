@@ -430,6 +430,74 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         "店主要收到付款恢復通知"
     );
 
+    // 3b'. Email 驗證(request_email_verification / verify_email)與登出所有裝置(revoke_sessions)。
+    // 其他步驟的應用程式把「要求驗證」關掉了,這裡另外用要求驗證的設定走一次真實流程
+    let strict = tenant_saas::routes::router(tenant_saas::routes::AppState::new(
+        pool.clone(),
+        &tenant_saas::config::Config {
+            require_verified_email: true,
+            ..common::test_config(3600)
+        },
+    ));
+    let newcomer = format!("newcomer-{unique}@example.com");
+    let (status, body) = common::register(&strict, &newcomer, "password123").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let newcomer_token = body["token"].as_str().unwrap().to_string();
+    assert_eq!(
+        create_tenant(&strict, &newcomer_token, &format!("{slug}-v"))
+            .await
+            .0,
+        StatusCode::FORBIDDEN,
+        "沒驗證不能開店"
+    );
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    let verify_mail = mail_of(&memory, &newcomer, "驗證您的 Email").expect("驗證信要寄出");
+    let verify_token: String = verify_mail
+        .body
+        .split("/admin/verify#token=")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take(64)
+        .collect();
+    let (status, body) = call(
+        &strict,
+        Method::POST,
+        "/auth/verify-email",
+        Some(json!({"token": verify_token})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "驗證要能在受限帳號下運作: {body}");
+    assert_eq!(
+        create_tenant(&strict, &newcomer_token, &format!("{slug}-v"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let (status, _) = call(
+        &strict,
+        Method::POST,
+        "/auth/logout-all",
+        None,
+        Some(&newcomer_token),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "登出所有裝置要能在受限帳號下運作"
+    );
+    let (status, _) = call(
+        &strict,
+        Method::GET,
+        "/auth/me",
+        None,
+        Some(&newcomer_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
     // 3c. 匯出(CSV)與刪除顧客個資(outbox_forget_recipient 函式寫 email_outbox)
     let (status, _, body) = raw_get(
         &app,

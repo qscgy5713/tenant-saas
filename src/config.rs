@@ -19,6 +19,8 @@ pub struct Config {
     pub public_base_url: String,
     /// 每位使用者最多能「擁有」幾家店(防止灌店家、占用代稱)
     pub max_shops_per_user: u32,
+    /// 沒驗證 Email 的使用者不能建立店家。只有開發 / 測試能關掉,production 不允許
+    pub require_verified_email: bool,
     /// 同一個收件者每小時最多收幾封信(跨店家;防止拿別人的 Email 當收件者騷擾)
     pub max_mails_per_recipient_per_hour: u32,
     /// 以 cookie 登入時,允許送出「會改資料」請求的網頁來源(CSRF 防護,見 session.rs)
@@ -81,6 +83,10 @@ impl Config {
                 .unwrap_or_else(|_| "預約系統 <noreply@localhost>".into()),
             public_base_url,
             max_shops_per_user: parse_max_shops(std::env::var("MAX_SHOPS_PER_USER").ok())?,
+            require_verified_email: parse_require_verified(
+                std::env::var("REQUIRE_VERIFIED_EMAIL").ok(),
+                production,
+            )?,
             max_mails_per_recipient_per_hour: parse_positive(
                 "MAX_MAILS_PER_RECIPIENT_PER_HOUR",
                 std::env::var("MAX_MAILS_PER_RECIPIENT_PER_HOUR").ok(),
@@ -200,5 +206,29 @@ mod shop_limit_tests {
         for bad in ["0", "-1", "many", "1.5"] {
             assert!(parse_max_shops(Some(bad.into())).is_err(), "{bad}");
         }
+    }
+}
+
+/// 預設要求驗證;只有明確寫 false / 0 才關,而且 production 不允許關
+fn parse_require_verified(raw: Option<String>, production: bool) -> Result<bool> {
+    let off = raw.is_some_and(|v| v == "false" || v == "0");
+    if off && production {
+        anyhow::bail!("production 不允許關閉 REQUIRE_VERIFIED_EMAIL");
+    }
+    Ok(!off)
+}
+
+#[cfg(test)]
+mod verified_tests {
+    use super::parse_require_verified;
+
+    #[test]
+    fn verification_is_required_unless_explicitly_disabled_outside_production() {
+        assert!(parse_require_verified(None, true).unwrap());
+        assert!(parse_require_verified(Some("true".into()), false).unwrap());
+        assert!(parse_require_verified(Some("".into()), false).unwrap());
+        assert!(!parse_require_verified(Some("false".into()), false).unwrap());
+        assert!(!parse_require_verified(Some("0".into()), false).unwrap());
+        assert!(parse_require_verified(Some("false".into()), true).is_err());
     }
 }

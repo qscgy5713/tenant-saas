@@ -1215,7 +1215,7 @@ describe('團隊', () => {
     })
 
     it('自己「退出團隊」= 停用自己(保留歷史),成功後回到店家列表', async () => {
-      const me = { id: 'u-me', email: 'me@demo.example.com', name: '小我' }
+      const me = { id: 'u-me', email: 'me@demo.example.com', name: '小我', email_verified: true }
       loginAs(me)
       mockShopMe('staff')
       serve(() => [

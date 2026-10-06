@@ -282,6 +282,23 @@ pub fn cancelled_for_staff(
     }
 }
 
+pub fn email_verification_link(base_url: &str, token: &str) -> String {
+    // 同重設密碼:token 放在 # 之後,不會送到任何伺服器、不進存取紀錄與 Referer
+    format!("{}/admin/verify#token={token}", base(base_url))
+}
+
+pub fn email_verification(to: &str, link: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "請驗證您的 Email".to_string(),
+        body: format!(
+            "您好,\n\n請開啟下列連結,確認這個 Email 是您的:\n\n  {link}\n\n\
+             連結 24 小時內有效,而且只能使用一次。驗證後才能建立店家。\n\
+             如果您沒有註冊過,請忽略這封信,不需要做任何事。\n"
+        ),
+    }
+}
+
 pub fn password_reset_link(base_url: &str, token: &str) -> String {
     // token 放在 # 之後:不會送到任何伺服器、不進存取紀錄與 Referer
     format!("{}/admin/reset#token={token}", base(base_url))

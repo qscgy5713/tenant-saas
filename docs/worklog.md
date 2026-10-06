@@ -2,6 +2,13 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-06(Email 驗證 + 登出所有裝置)
+- migration 0027;`/auth/verify-email`、`/auth/resend-verification`、`/auth/logout-all`;建立店家要求已驗證;前端驗證頁、店家列表的提醒、登出所有裝置;E2E 的註冊輔助函式改走真實信箱驗證(所有 E2E 都因此走過這條流程)
+- 讀程式後**改了先前的建議**:不做 refresh token(原因見 decisions)
+- **我自己的失誤**:做突變驗證時備份檔 `src/auth.rs` 和 `src/routes/auth.rs` 同名(`auth.rs`)互相覆蓋,還原時把 `src/auth.rs` 換成錯的內容(編譯錯誤才發現)。靠 `git show HEAD:src/auth.rs` 取回再重新套用。**備份檔要用不會撞名的名稱**
+- 整合測試抓到的真實缺口:登出所有裝置同一秒內簽發的 token 仍有效 → 改成 `<=`(見 decisions)
+- 測試:後端整合 9、前端 7(含 StrictMode)、E2E 2(註冊 UI 流程擴充 + 登出所有裝置跨瀏覽器;E2E 共 11 個);`restricted_role` 補驗證與撤銷流程
+
 ## 2026-10-06(停用改派的 E2E)
 - `web/e2e/team.spec.ts` 新增:停用時選「改派給店主」→ 停用成功 → 顧客真的收到「人員已變更」信(Mailpit)。突變驗證:前端不送 `reassign_to` 時失敗。E2E 現在 10 個。
 
