@@ -290,6 +290,41 @@ async fn the_database_function_rechecks_instead_of_trusting_the_candidate_list(p
     }
 }
 
+#[sqlx::test]
+async fn one_bad_customer_does_not_block_the_others(pool: PgPool) {
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    let (_, poison) = past_booking(&pool, &s, "shop-a", "poison@example.com", 800, 0).await;
+    let (_, fine) = past_booking(&pool, &s, "shop-a", "fine@example.com", 850, 1).await;
+    // 讓「poison」那位顧客的更新一定出錯(模擬資料有問題)
+    sqlx::query(
+        "CREATE FUNCTION boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'boom'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER boom BEFORE UPDATE ON customers FOR EACH ROW
+         WHEN (OLD.email = 'poison@example.com') EXECUTE FUNCTION boom()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let stats = retention_sweep(&pool, Some(730)).await;
+    assert_eq!(stats.customers_anonymized, 1, "出錯的那位不能拖累其他人");
+    assert!(is_anonymized(&customer(&pool, fine).await));
+    assert!(!is_anonymized(&customer(&pool, poison).await));
+    // 出錯的那位沒有留下任何半套的稽核
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM audit_logs WHERE action = 'customer.anonymized'"
+        )
+        .await,
+        1
+    );
+}
+
 // ---------- 稽核日誌到期清除 ----------
 
 #[sqlx::test]
@@ -552,6 +587,164 @@ async fn an_expired_grace_period_deletes_the_shop_and_everything_in_it_but_nothi
     assert_eq!(
         create_tenant(&s.app, &s.owner, "shop-a").await.0,
         StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn a_shop_that_still_has_upcoming_bookings_at_the_deadline_is_not_deleted(pool: PgPool) {
+    // 申請時沒有預約,但之後(競態或將來新增的入口)出現了:到期時不能直接把顧客在等的預約刪掉
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    assert_eq!(
+        request_delete(&s, "shop-a", &s.owner, "shop-a").await.0,
+        StatusCode::OK
+    );
+    let (status, booking) = {
+        // 繞過公開與後台的檢查,直接寫入一筆未來的預約
+        sqlx::query(
+            "UPDATE tenants SET deletion_requested_at = NULL, deletion_scheduled_at = NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = book(&s, "shop-a", at(day(3), 10), "c@example.com").await;
+        sqlx::query(
+            "UPDATE tenants SET deletion_requested_at = now() - interval '31 days',
+                                deletion_scheduled_at = now() - interval '1 minute'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        r
+    };
+    assert_eq!(status, StatusCode::CREATED, "{booking}");
+
+    let stats = retention_sweep(&pool, Some(730)).await;
+    assert_eq!(stats.tenants_deleted, 0);
+    assert_eq!(count(&pool, "SELECT count(*) FROM tenants").await, 1);
+    assert_eq!(count(&pool, "SELECT count(*) FROM bookings").await, 1);
+    // 刪除被自動取消,而且有稽核說明原因
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM tenants WHERE deletion_scheduled_at IS NOT NULL"
+        )
+        .await,
+        0
+    );
+    let detail: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit_logs WHERE action = 'tenant.deletion_cancelled' AND actor_type = 'system'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detail["reason"], "live_bookings");
+}
+
+#[sqlx::test]
+async fn the_deletion_mail_dedupe_key_does_not_contain_an_email_address(pool: PgPool) {
+    // 信件寄出後內文會清空,但 dedupe_key 會一直留著:不能放個資
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    assert_eq!(
+        request_delete(&s, "shop-a", &s.owner, "shop-a").await.0,
+        StatusCode::OK
+    );
+    let key: String =
+        sqlx::query_scalar("SELECT dedupe_key FROM email_outbox WHERE subject LIKE '%已申請刪除%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!key.contains('@') && !key.contains("example.com"), "{key}");
+}
+
+#[sqlx::test]
+async fn creating_a_booking_waits_for_a_deletion_request_in_progress(pool: PgPool) {
+    // 「申請刪除」進行中(持有獨佔鎖)時,新增預約要等它結束,否則會留下一筆之後被刪掉的預約
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    let tenant: Uuid = sqlx::query_scalar("SELECT id FROM tenants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('tenant-deletion:' || $1::text, 0))",
+    )
+    .bind(tenant)
+    .execute(&mut *lock)
+    .await
+    .unwrap();
+
+    let attempt = tokio::spawn({
+        let (app, owner, service_id, owner_id) = (
+            s.app.clone(),
+            s.owner.clone(),
+            s.service_id.clone(),
+            s.owner_id,
+        );
+        async move {
+            call(
+                &app,
+                Method::POST,
+                "/t/shop-a/bookings",
+                Some(json!({
+                    "service_id": service_id,
+                    "staff_id": owner_id,
+                    "start": at(day(3), 10).to_rfc3339(),
+                    "customer": {"name": "王小明", "email": "c@example.com"},
+                })),
+                Some(&owner),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(!attempt.is_finished(), "新增預約應該在等鎖");
+
+    lock.commit().await.unwrap();
+    let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), attempt)
+        .await
+        .expect("鎖釋放後要能完成")
+        .unwrap();
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[sqlx::test]
+async fn requesting_deletion_waits_for_bookings_being_created(pool: PgPool) {
+    // 反方向:新增預約進行中(持有共享鎖)時,申請刪除要等它,等到之後才會看到那筆預約
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    let tenant: Uuid = sqlx::query_scalar("SELECT id FROM tenants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut creating = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('tenant-deletion:' || $1::text, 0))",
+    )
+    .bind(tenant)
+    .execute(&mut *creating)
+    .await
+    .unwrap();
+
+    let mut requesting = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)",
+    )
+    .bind(tenant.to_string())
+    .bind(s.owner_id.to_string())
+    .execute(&mut *requesting)
+    .await
+    .unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '300ms'")
+        .execute(&mut *requesting)
+        .await
+        .unwrap();
+    let err = sqlx::query("SELECT request_tenant_deletion(30)")
+        .execute(&mut *requesting)
+        .await
+        .unwrap_err();
+    // 55P03 = lock_not_available:代表它真的在等那把鎖
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("55P03")
     );
 }
 

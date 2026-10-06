@@ -9,6 +9,12 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
 
+    # 指標只給內網的 Prometheus 直接向後端抓取(見 deploy/prometheus.yml),不從公網代理出去:
+    # 即使有 token,也不該讓外面的人看到流量與錯誤率
+    location = /api/metrics {
+        return 404;
+    }
+
     location /api/ {
         # 結尾的斜線會把 /api/ 前綴去掉:/api/public/shops/x → /public/shops/x
         proxy_pass ${API_UPSTREAM}/;

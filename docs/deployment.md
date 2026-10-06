@@ -135,7 +135,9 @@ docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod up 
 - 因為前面是自己的 nginx,compose 裡設了 `TRUST_PROXY=true`(見下方「反向代理與 TLS」);若你在 `web` 前面又加一層代理,要確認每一層都是「附加」而不是「轉傳」
 - 必填的變數沒填會直接報錯(`${VAR:?}`),不會悄悄用空值啟動
 - 要監控:建立 `deploy/secrets/metrics_token`(內容與 `METRICS_TOKEN` 相同),加 `--profile monitoring`
-- **這份範例只驗證過 `docker compose config` 能解析、規則檔能通過 promtool;沒有在真實主機上跑過一次完整部署**
+- 網頁埠預設綁 `127.0.0.1:8080`,被占用時用 `WEB_PORT` 改(`PUBLIC_BASE_URL` 也要對應)。專案名稱是 `tenant-saas-prod`,和開發用的 compose 不會互相影響
+- `/api/metrics` 在 nginx 直接回 404(指標只給內網的 Prometheus 向 `app:3001` 直接抓取)
+- **已在本機完整演練過一次**(2026-10-06):建置兩個映像 → `migrate` → 以 production 模式 + 受限帳號啟動 → 健康檢查 → 經 nginx 註冊 / 驗證 Email(真實 SMTP 到 Mailpit)/ 開店 / CSRF 拒絕 → Prometheus 用 token 抓到指標、9 條規則載入且沒有誤報 → 真實瀏覽器走完整流程(`__Host-session` + HttpOnly + Secure + SameSite=Strict)→ `docker stop` 1 秒內優雅關閉 → 各種錯誤設定(超級使用者連線、缺 SMTP、關閉驗證、稽核保留過短、指標 token 過短)都在啟動時被拒絕。**尚未在真實主機與真實 HTTPS(憑證、反向代理、真實 SMTP 服務商)上驗證**
 
 ## 反向代理與 TLS
 

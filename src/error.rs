@@ -13,7 +13,7 @@ pub enum AppError {
     Unauthorized,
     #[error("沒有權限執行此操作")]
     Forbidden,
-    #[error("請先驗證 Email 才能建立店家,驗證信已寄到您的信箱")]
+    #[error("請先驗證 Email 才能建立店家(請查看信箱;沒收到可以在店家列表重新寄送)")]
     EmailNotVerified,
     #[error("找不到資源")]
     NotFound,

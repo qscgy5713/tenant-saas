@@ -147,3 +147,25 @@ test('登出所有裝置:另一個瀏覽器的登入也立刻失效', async ({ p
   await page.goto('/admin')
   await expect(page.getByRole('heading', { name: '我的店家' })).toBeVisible()
 })
+
+test('未登入的瀏覽器(例如在手機上開信)點驗證連結:成功畫面不會被導走', async ({
+  request,
+  browser,
+}) => {
+  const email = `anon-${uniq()}@example.com`
+  const r = await request.post(`${API}/auth/register`, {
+    data: { email, password: PASSWORD, name: '路人' },
+  })
+  expect(r.ok()).toBeTruthy()
+  const mail = await waitForMail(request, email, '驗證')
+
+  const context = await browser.newContext() // 沒有任何 cookie
+  const page = await context.newPage()
+  await page.goto(linkIn(mail, '/admin/verify'))
+  await expect(page.getByRole('heading', { name: 'Email 已驗證' })).toBeVisible()
+  // 驗證成功後頁面會向後端確認登入狀態(沒登入會得到 401),不能因此被導去登入頁
+  await page.waitForTimeout(2000)
+  await expect(page).toHaveURL(/\/admin\/verify/)
+  await expect(page.getByRole('heading', { name: 'Email 已驗證' })).toBeVisible()
+  await context.close()
+})

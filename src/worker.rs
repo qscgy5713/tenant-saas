@@ -324,13 +324,27 @@ async fn anonymize_expired_customers(pool: &PgPool) -> Result<u64, AppError> {
     .await?;
     let mut done = 0;
     for (customer, tenant) in candidates {
-        let did: bool = sqlx::query_scalar("SELECT retention_anonymize_customer($1, $2)")
-            .bind(customer)
-            .bind(tenant)
-            .fetch_one(&mut *tx)
-            .await?;
-        if did {
-            done += 1;
+        // 每位顧客各自一個 savepoint:某一位出錯(例如資料有問題)只跳過他,不讓整批回滾、
+        // 也不讓同一位排在最前面的壞資料每小時都擋住後面的人
+        let mut sp = sqlx::Acquire::begin(&mut tx).await?;
+        let did: Result<bool, sqlx::Error> =
+            sqlx::query_scalar("SELECT retention_anonymize_customer($1, $2)")
+                .bind(customer)
+                .bind(tenant)
+                .fetch_one(&mut *sp)
+                .await;
+        match did {
+            Ok(did) => {
+                sp.commit().await?;
+                if did {
+                    done += 1;
+                }
+            }
+            Err(err) => {
+                sp.rollback().await?;
+                metrics::counter!("customers_anonymize_failed_total").increment(1);
+                tracing::error!(customer_id = %customer, error = %err, "匿名化顧客失敗,略過");
+            }
         }
     }
     tx.commit().await?;

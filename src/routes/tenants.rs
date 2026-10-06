@@ -378,13 +378,13 @@ async fn request_deletion(
             .await?;
     let tz: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
     // 通知所有店主(不只是申請的人):刪除是影響整家店的大事
-    let owners: Vec<String> = sqlx::query_scalar(
-        "SELECT u.email::text FROM memberships m JOIN users u ON u.id = m.user_id
+    let owners: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT u.id, u.email::text FROM memberships m JOIN users u ON u.id = m.user_id
          WHERE m.role = 'owner' AND m.active",
     )
     .fetch_all(&mut *tx)
     .await?;
-    for to in owners {
+    for (owner_id, to) in owners {
         let msg = mail::tenant_deletion_requested(
             &to,
             &shop,
@@ -395,8 +395,9 @@ async fn request_deletion(
             &mut tx,
             ctx.tenant_id,
             &msg,
+            // 去重鍵用使用者 id,不要放 Email:信件寄出後內文會清空,但 dedupe_key 會一直留著
             Some(&format!(
-                "tenant_deletion:{}:{}:{to}",
+                "tenant_deletion:{}:{}:{owner_id}",
                 ctx.tenant_id,
                 when.timestamp()
             )),

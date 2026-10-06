@@ -287,6 +287,15 @@ pub async fn create_booking(
     ));
     check_start_in_window(input.start)?;
     // 申請刪除的店家不再接受新預約(否則「沒有未來預約才能申請」的前提會被繞過,顧客會被撲空)
+    // 共享的 advisory lock,和「申請刪除」(同一把鎖的獨佔版)互斥。沒有它,兩邊同時進行時會變成
+    // 「申請檢查時沒有預約、新增預約時還沒被標記」,留下一筆之後會被刪掉的預約。
+    // 不用 SELECT … FOR SHARE:租戶角色對 tenants 只有 SELECT 權限,鎖定讀取需要 UPDATE 權限
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('tenant-deletion:' || $1::text, 0))",
+    )
+    .bind(tenant_id)
+    .execute(&mut **tx)
+    .await?;
     let deleting: bool =
         sqlx::query_scalar("SELECT deletion_scheduled_at IS NOT NULL FROM tenants WHERE id = $1")
             .bind(tenant_id)

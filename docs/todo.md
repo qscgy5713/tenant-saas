@@ -131,7 +131,7 @@
 - [x] CI 已在 GitHub 上實際執行(每次 push 觸發,5 個工作:test / restricted-role / web / 2 個 docker)。曾抓到一次間歇性失敗:`CREATE ROLE tenant_runtime` 在平行測試間的競態(見 decisions)
 - [ ] 正式環境的 TLS 連線資料庫(`sslmode=require`)尚未實測
 - [ ] 映像漏洞掃描、SBOM、簽章
-- [x] 正式環境 compose 範例(`deploy/docker-compose.prod.yml`)。**只驗證過 `config` 能解析,沒有在真實主機完整部署過**;不含資料庫(請用託管 PostgreSQL)
+- [x] 正式環境 compose 範例(`deploy/docker-compose.prod.yml`)。**已在本機完整演練(建置、migrate、production 模式啟動、真實瀏覽器流程、Prometheus 規則,見 deployment「Docker Compose 部署範例」),但沒有在真實主機與真實 HTTPS 上驗證**;不含資料庫(請用託管 PostgreSQL)
 - [ ] 其他尚未做的上線前項目見 `docs/deployment.md` 檢查表「尚未做」區(營運人員後台、跨實例限流、負載測試)
 
 ## 前端(顧客預約頁,`web/`)
@@ -146,7 +146,7 @@
 - [x] 後台:週日曆檢視(重疊的並排、已取消不畫、點開看詳情)
 - [x] 後台:月檢視(點日期進當天列表、點預約看詳情)
 - [x] 後台:週日曆拖曳改期(拖到別天 / 別的時間,吸附 15 分鐘,放開先跳確認再送出;能不能改由後端判斷)。**限制:只支援滑鼠**(HTML5 拖放不支援觸控),鍵盤與手機請用詳情裡的「改期」;月檢視與列表不能拖
-- [x] 後台:用 HttpOnly cookie 取代 localStorage 存 JWT(`__Host-session`、SameSite=Strict、Origin 白名單防 CSRF、`POST /auth/logout`)。**尚未用真實 HTTPS 環境驗證 `__Host-`/`Secure` cookie**(本機只有 http 開發環境);部署時請實測登入
+- [x] 後台:用 HttpOnly cookie 取代 localStorage 存 JWT(`__Host-session`、SameSite=Strict、Origin 白名單防 CSRF、`POST /auth/logout`)。**已在 production 堆疊(`http://localhost`,Chromium 視為安全來源)驗證 `__Host-session` + Secure 能正常登入與重新整理;尚未用真實 HTTPS 網域驗證**,部署時請實測登入
 - [x] JWT 撤銷:改密碼 / 重設密碼 / 「登出所有裝置」都會讓舊 token 立刻失效(每個請求查資料庫)
 - [ ] 單一裝置登出(只清 cookie,偷到 token 的人到期前仍可用 Bearer,除非改密碼或登出所有裝置);沒有「登入中的裝置」清單 —— 要做需要伺服器端 session 表
 - [x] 註冊 Email 驗證:沒驗證不能建立店家(其他功能不受影響);重寄每小時 3 封;邀請 / 重設密碼連結也算驗證
@@ -156,6 +156,7 @@
 - [x] 刪除顧客個資(匿名化,僅擁有者,不可還原):姓名 / Email / 電話換成無法還原的代號,預約備註清空,沒寄出的信刪除、已寄出的信件紀錄改匿名地址;預約本身保留(統計);還有未來 / 待確認預約時拒絕;留稽核 `customer.anonymized`
 - [ ] 刻意**不做**「硬刪除預約」:預約有稽核與統計的關聯,取消已涵蓋「這筆不要了」;要刪的是個資,見上
 - [x] 資料保留:顧客個資到期自動匿名化(每店可調 90–3650 天)、稽核日誌到期清除、店主申請刪除店家(30 天寬限、可取消、期滿硬刪除)
+- [ ] 註冊濫用:註冊會對任意 Email 寄驗證信(每 IP 每分鐘 10 次),可被拿來騷擾別人的信箱;沒有 CAPTCHA。伺服器時鐘差異會讓撤銷 / 改密碼的邊界偏移(要 NTP)
 - [ ] 資料保留的缺口:備份不會被清理;使用者帳號(跨店)沒有刪除功能;匿名化前不會通知顧客或店家;一次最多處理 200 位顧客(量大時要多輪);刪除店家前沒有「匯出所有資料」(只有稽核與預約的 CSV);沒有「店家退出」以外的帳號關閉流程
 - [ ] 刪除個資的缺口:不涵蓋應用程式日誌與資料庫備份(請依保留政策處理);沒有顧客自助的「刪除我的資料」入口(目前由店家擁有者代為處理);自動保留期限已做(顧客個資 730 天預設)但不涵蓋備份
 - [x] 改期時自己原本的時段不再顯示為忙碌(改用「依預約」的可預約時段端點)
