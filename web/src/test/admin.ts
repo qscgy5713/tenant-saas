@@ -13,6 +13,8 @@ export const USER: User = {
 /** 模擬「已登入」:登入靠 HttpOnly cookie,前端只記使用者是誰 */
 export function loginAs(user: User = USER) {
   setSession(user)
+  // 店家列表頁會載入「最近的帳號活動」:預設沒有紀錄(需要的測試自己再覆寫)
+  server.use(http.get(`${API}/auth/security-events`, () => HttpResponse.json([])))
 }
 
 export const SHOP = (role: Role = 'owner'): ShopDetail => ({
@@ -23,6 +25,9 @@ export const SHOP = (role: Role = 'owner'): ShopDetail => ({
   role,
   customer_retention_days: 730,
   deletion_scheduled_at: null,
+  description: null,
+  address: null,
+  phone: null,
 })
 
 /** 註冊「我在這家店的身分」,測試各角色看到的畫面 */

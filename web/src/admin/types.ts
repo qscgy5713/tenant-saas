@@ -31,6 +31,23 @@ export interface ShopDetail extends MyShop {
   customer_retention_days: number
   /** 已申請刪除時,預定永久刪除的時間;沒有申請時為 null */
   deletion_scheduled_at: string | null
+  /** 顧客預約頁上顯示的店家資訊(都是選填) */
+  description: string | null
+  address: string | null
+  phone: string | null
+}
+
+/** 帳號層級的安全事件(只有本人看得到) */
+export interface AccountEvent {
+  kind:
+    | 'registered'
+    | 'login'
+    | 'login_failed'
+    | 'locked'
+    | 'logout_all'
+    | 'password_reset'
+    | 'email_verified'
+  created_at: string
 }
 
 export interface Member {

@@ -546,3 +546,37 @@ describe('刪除帳號', () => {
     expect(within(await screen.findByRole('dialog')).getByLabelText('輸入密碼確認')).toHaveValue('')
   })
 })
+
+describe('最近的帳號活動', () => {
+  it('展開後列出事件(最新在前);沒有紀錄時說明', async () => {
+    loginAs()
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.get(`${API}/auth/security-events`, () =>
+        HttpResponse.json([
+          { kind: 'locked', created_at: '2026-10-06T02:00:00Z' },
+          { kind: 'login_failed', created_at: '2026-10-06T01:59:00Z' },
+          { kind: 'login', created_at: '2026-10-06T01:00:00Z' },
+        ]),
+      ),
+    )
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByText('最近的帳號活動'))
+    const items = await screen.findAllByText(/鎖定|登入失敗|^登入$/)
+    expect(items.map((i) => i.textContent)).toEqual([
+      '連續失敗,帳號暫時鎖定',
+      '登入失敗(密碼錯誤)',
+      '登入',
+    ])
+    expect(screen.getByText(/不是你做的登入/)).toBeInTheDocument()
+  })
+
+  it('沒有紀錄', async () => {
+    loginAs()
+    server.use(http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])))
+    renderApp('/admin')
+    await userEvent.setup().click(await screen.findByText('最近的帳號活動'))
+    expect(await screen.findByText('沒有紀錄。')).toBeInTheDocument()
+  })
+})

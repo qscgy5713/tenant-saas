@@ -678,3 +678,231 @@ async fn deactivated_members_cannot_be_invited_or_promoted_and_delete_points_to_
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+// ---------- 移交店主 ----------
+
+async fn transfer(
+    app: &Router,
+    token: &str,
+    to: uuid::Uuid,
+    password: &str,
+) -> (StatusCode, Value) {
+    call(
+        app,
+        Method::POST,
+        "/t/shop-a/transfer-ownership",
+        Some(json!({"user_id": to, "password": password})),
+        Some(token),
+    )
+    .await
+}
+
+async fn role_of(pool: &PgPool, email: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT m.role::text FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1::citext",
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn the_owner_can_hand_the_shop_to_a_member_and_becomes_a_manager(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    let manager = signup(&app, "m@example.com").await;
+    let staff = signup(&app, "s@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+    add_member(&pool, "shop-a", "s@example.com", "staff").await;
+    let m = user_id(&pool, "m@example.com").await;
+    let a = user_id(&pool, "a@example.com").await;
+
+    // 只有店主、不能給自己、密碼要對
+    assert_eq!(
+        transfer(&app, &manager, m, "password123").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        transfer(&app, &staff, m, "password123").await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        transfer(&app, &owner, a, "password123").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, body) = transfer(&app, &owner, m, "wrong-password").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(role_of(&pool, "a@example.com").await, "owner");
+    // 不存在 / 別家店的人
+    assert_eq!(
+        transfer(&app, &owner, uuid::Uuid::new_v4(), "password123")
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, body) = transfer(&app, &owner, m, "password123").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(role_of(&pool, "m@example.com").await, "owner");
+    assert_eq!(role_of(&pool, "a@example.com").await, "manager");
+    // 店家永遠只有一位擁有者
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memberships WHERE role = 'owner'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    // 稽核、通知新店主
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'ownership.transferred'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let (subject, body): (String, String) = sqlx::query_as(
+        "SELECT subject, body FROM email_outbox WHERE dedupe_key LIKE 'ownership_transferred:%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        subject.contains("擁有者") && body.contains("小明"),
+        "{subject} {body}"
+    );
+
+    // 權限立刻跟著變:舊店主不能再改店家設定,新店主可以
+    let (status, _) = call(
+        &app,
+        Method::PATCH,
+        "/t/shop-a",
+        Some(json!({"name": "新名字"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &app,
+        Method::PATCH,
+        "/t/shop-a",
+        Some(json!({"name": "新名字"})),
+        Some(&manager),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // 舊店主現在可以刪除自己的帳號(不再是店主)
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/auth/delete-account",
+        Some(json!({"password": "password123"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[sqlx::test]
+async fn ownership_cannot_go_to_someone_deactivated_or_already_an_owner(pool: PgPool) {
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    signup(&app, "m@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+    let m = user_id(&pool, "m@example.com").await;
+    let a = user_id(&pool, "a@example.com").await;
+
+    let (status, _) = post_member(&app, &owner, m, "deactivate").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = transfer(&app, &owner, m, "password123").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(role_of(&pool, "a@example.com").await, "owner");
+    let _ = a;
+}
+
+#[sqlx::test]
+async fn ownership_cannot_go_to_someone_who_already_owns_the_shop(pool: PgPool) {
+    // 正常情況下店家只有一位擁有者;這裡用 SQL 造出「另一位也是擁有者」的狀態,確認移交會拒絕
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    signup(&app, "m@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+    sqlx::query("UPDATE memberships SET role = 'owner' WHERE user_id = (SELECT id FROM users WHERE email = 'm@example.com')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m = user_id(&pool, "m@example.com").await;
+    let (status, body) = transfer(&app, &owner, m, "password123").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(role_of(&pool, "a@example.com").await, "owner");
+}
+
+#[sqlx::test]
+async fn wrong_passwords_when_transferring_count_towards_the_account_lockout(pool: PgPool) {
+    // 持有被盜登入狀態的人不能靠這個端點無限次猜密碼
+    let app = app(pool.clone());
+    let owner = signup(&app, "a@example.com").await;
+    signup(&app, "m@example.com").await;
+    create_tenant(&app, &owner, "shop-a").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+    let m = user_id(&pool, "m@example.com").await;
+
+    for _ in 0..4 {
+        assert_eq!(
+            transfer(&app, &owner, m, "wrong-password").await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // 第 5 次失敗 → 鎖定、寄通知信
+    assert_eq!(
+        transfer(&app, &owner, m, "wrong-password").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, body) = transfer(&app, &owner, m, "password123").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "鎖定中連正確密碼都不收: {body}"
+    );
+    assert!(body["error"].as_str().unwrap().contains("鎖定"), "{body}");
+    assert_eq!(role_of(&pool, "a@example.com").await, "owner");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM email_outbox WHERE to_email = 'a@example.com' AND subject LIKE '%鎖定%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    // 帳號被鎖:登入也被擋(和猜登入密碼一致)
+    let (status, _) = call(
+        &app,
+        Method::POST,
+        "/auth/login",
+        Some(json!({"email": "a@example.com", "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // 鎖定到期後正確的密碼可以;成功會清掉先前的失敗次數
+    sqlx::query("UPDATE users SET locked_until = now() - interval '1 minute'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        transfer(&app, &owner, m, "password123").await.0,
+        StatusCode::NO_CONTENT
+    );
+    let failed: i32 =
+        sqlx::query_scalar("SELECT failed_logins FROM users WHERE email = 'a@example.com'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(failed, 0);
+}

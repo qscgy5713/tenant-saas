@@ -14,6 +14,11 @@ export function canDeactivate(me: { id: string; role: Role }, target: Member): b
   return target.active && canRemove(me, target)
 }
 
+/** 移交店主身分:只有店主,對象要是啟用中、不是自己、也還不是店主的成員 */
+export function canTransferOwnership(me: { id: string; role: Role }, target: Member): boolean {
+  return me.role === 'owner' && target.active && target.role !== 'owner' && target.user_id !== me.id
+}
+
 /** 重新啟用:只有管理者以上(停用中的人自己已經進不了這家店) */
 export function canReactivate(me: { id: string; role: Role }, target: Member): boolean {
   return !target.active && target.user_id !== me.id && canRemove(me, target)

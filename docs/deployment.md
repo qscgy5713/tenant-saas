@@ -176,6 +176,16 @@ nginx 設定(`web/nginx.conf.template`)刻意做的事,因為**預約管理頁�
 - 嚴格的 CSP(只允許同源的腳本與樣式)、`frame-ancestors 'none'`(不能被嵌進別人的頁面)
 - 帶 hash 的 `/assets/` 永久快取;不存在的資產回 404(不被 SPA 的 fallback 吃掉)
 
+## 映像與依賴的安全掃描
+
+CI 每次推送與**每週一**(`schedule`:漏洞資料庫每天更新,程式沒動也可能出現新漏洞)都會:
+- 用 Trivy 掃兩個映像與 `Cargo.lock` / `package-lock.json`;有「已有修正版」的 HIGH / CRITICAL 漏洞就失敗(沒有修正版的無從處理,不擋)
+- 產生 CycloneDX 格式的 SBOM,存成 CI 產物(`sbom-api`、`sbom-web`,保留 90 天)
+- Dockerfile 在執行階段先升級基底映像已有的套件(`apt-get upgrade` / `apk upgrade`):`nginx:1.27-alpine` 是釘住的次版本,不升級的話本機掃出 44 個 HIGH / CRITICAL,升級後為 0
+- **映像簽章沒做**:需要先決定映像放在哪個 registry(簽章綁定映像的摘要)
+
+本機執行:`docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 image --severity HIGH,CRITICAL --ignore-unfixed 映像名稱`
+
 ## 監控
 
 ```yaml
@@ -218,6 +228,8 @@ docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest
 | 顧客個資 | 最後一筆預約之後超過保留天數,且沒有進行中的預約 → 匿名化(姓名、Email、電話、預約備註抹除,預約與統計保留;未寄出的信刪除、已寄出的信件紀錄改匿名地址)。沒有預約的顧客以建立時間起算 | 每家店 90–3650 天,預設 730,店主在「設定」調整 |
 | 稽核日誌 | 超過 `AUDIT_RETENTION_DAYS` 天 → 刪除 | 全系統,預設 730 |
 | 信件佇列 | 已完成的 30 天後刪除 | 固定 |
+| 未驗證的帳號 | 註冊後 30 天仍沒驗證 Email、也沒加入任何店家 → 刪除(釋出被占住的 Email) | 固定 |
+| 帳號安全事件 | 180 天後刪除(使用者在店家列表頁看得到自己的「最近的帳號活動」) | 固定 |
 | 整家店 | 店主申請 → 30 天寬限(公開預約頁與預約管理連結立即關閉、不能新增預約、可取消)→ 期滿連同所有資料刪除 | 寬限期固定 30 天 |
 
 **要知道的限制:**

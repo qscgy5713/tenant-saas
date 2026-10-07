@@ -17,6 +17,7 @@ import {
   today,
 } from '../test/server'
 import { addDays } from '../lib/time'
+import { telHref } from '../lib/phone'
 
 beforeEach(() => freezeNow())
 
@@ -479,5 +480,50 @@ describe('送出預約申請', () => {
     mockShop()
     renderApp('/s/demo-salon/book/ghost')
     expect(await screen.findByText('找不到這項服務')).toBeInTheDocument()
+  })
+})
+
+describe('店家資訊', () => {
+  it('顯示簡介、地址(地圖連結)與電話(撥號連結);電話連結只留數字與加號', async () => {
+    mockShop({
+      shop: {
+        name: '森林系髮廊',
+        timezone: 'Asia/Taipei',
+        description: '專做自然捲。\n歡迎預約!',
+        address: '台北市中山區南京東路一段 1 號',
+        phone: '+886 2-1234-5678 #12',
+      },
+      services: [SERVICE],
+    })
+    renderApp('/s/demo-salon')
+    expect(await screen.findByText(/專做自然捲/)).toBeInTheDocument()
+    const address = screen.getByRole('link', { name: /南京東路/ })
+    expect(address).toHaveAttribute(
+      'href',
+      `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent('台北市中山區南京東路一段 1 號')}`,
+    )
+    expect(address).toHaveAttribute('rel', expect.stringContaining('noreferrer'))
+    expect(screen.getByRole('link', { name: /2-1234-5678/ })).toHaveAttribute(
+      'href',
+      'tel:+886212345678;ext=12',
+    )
+  })
+
+  it.each([
+    ['02-1234-5678', 'tel:0212345678'],
+    ['(02) 1234 5678', 'tel:0212345678'],
+    ['+886 2-1234-5678', 'tel:+886212345678'],
+    ['+886 2-1234-5678 #12', 'tel:+886212345678;ext=12'],
+    ['02-1234-5678 # 7 8', 'tel:0212345678;ext=78'],
+    ['02-1234-5678 #', 'tel:0212345678'],
+  ])('電話 %s → %s(分機放在 ;ext=,不接在號碼後面)', (phone, href) => {
+    expect(telHref(phone)).toBe(href)
+  })
+
+  it('沒填就什麼都不顯示', async () => {
+    mockShop({ services: [SERVICE] })
+    renderApp('/s/demo-salon')
+    await screen.findByRole('link', { name: /剪髮/ })
+    expect(screen.queryByLabelText('店家聯絡資訊')).not.toBeInTheDocument()
   })
 })

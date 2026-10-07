@@ -286,6 +286,18 @@ pub fn settings_link(base_url: &str, slug: &str) -> String {
     format!("{}/admin/{slug}/settings", base(base_url))
 }
 
+pub fn ownership_transferred(to: &str, shop: &str, from_name: &str, settings_link: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: format!("您已成為「{shop}」的擁有者"),
+        body: format!(
+            "您好,\n\n{from_name} 已把「{shop}」的擁有者身分移交給您。\n\
+             您現在可以管理店家設定、成員與方案,也能刪除店家:\n\n  {settings_link}\n\n\
+             如果您不認識對方或不想接手,請到後台的團隊頁調整,或聯絡原擁有者。\n"
+        ),
+    }
+}
+
 pub fn tenant_deletion_requested(to: &str, shop: &str, when: &str, settings_link: &str) -> Email {
     Email {
         to: to.to_string(),

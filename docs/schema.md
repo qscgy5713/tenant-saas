@@ -292,7 +292,9 @@ CREATE POLICY tenant_isolation ON services
 ## 後續新增(0012–0014)
 | 資料表 / 欄位 | 說明 | 存取 |
 |---|---|---|
-| `bookings.reminder_token_hash` | 提醒信專用的管理 token 的雜湊(與 `manage_token_hash` 並存,任一個都能管理這筆預約);每次排提醒時換新 | worker(排提醒時寫入);公開預約端點以 `manage_token_hash OR reminder_token_hash` 查詢 |
+| `bookings.reminder_token_hashes` | 提醒信專用的管理 token 的雜湊陣列(與 `manage_token_hash` 並存,任一個都能管理這筆預約);每次排提醒時加一個,**保留最近 10 個**,舊提醒信的連結仍然有效(GIN 索引) | worker(排提醒時寫入);公開預約端點以 `manage_token_hash OR reminder_token_hashes @> ARRAY[…]` 查詢 |
+| `tenants.description` / `address` / `phone` | 顧客預約頁顯示的店家資訊(選填;長度有 CHECK;電話只允許數字與 `+-()# `,因為會做成 `tel:` 連結) | 只能經 `update_shop_profile`(僅店主) |
+| `account_events` | 帳號層級的安全事件(登入、失敗、鎖定、登出所有裝置、改密碼、驗證 Email、註冊):**不記 IP 與裝置**,只有種類與時間;保留 180 天 | **只能經** `record_account_event` / `list_account_events`(runtime)與 `retention_purge_account_events`(worker) |
 | `bookings.reminder_seq` | 每次改期 +1,提醒信的去重鍵含它,改期後才會再提醒 | 同 bookings |
 | `memberships.active` | 員工停用(離職):false 時進不了這家店、不出現在可預約名單、不佔方案名額;歷史預約保留。見 decisions「員工停用」 | tenant_app(經 `deactivate` / `reactivate` 端點) |
 | `users.password_changed_at` | 驗證登入時,簽發時間早於它的 JWT 一律拒絕 | 僅 runtime(SELECT/INSERT 之外由函式寫入) |

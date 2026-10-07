@@ -4,6 +4,10 @@ export interface Shop {
   name: string
   /** IANA 時區,例如 Asia/Taipei。所有時段都要以這個時區顯示 */
   timezone: string
+  /** 店家簡介、地址、電話(都是選填,沒填就是 null) */
+  description: string | null
+  address: string | null
+  phone: string | null
 }
 
 export interface Service {

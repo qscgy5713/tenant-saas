@@ -339,3 +339,32 @@ async fn the_database_function_refuses_a_second_deletion(pool: PgPool) {
         Some("P0003")
     );
 }
+
+#[sqlx::test]
+async fn wrong_passwords_when_deleting_count_towards_the_account_lockout(pool: PgPool) {
+    let s = shop(&pool).await;
+    for _ in 0..5 {
+        assert_eq!(
+            delete_account(&s.app, Some(&s.staff), "wrong-password")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // 鎖定中:連正確的密碼都不收,帳號也沒被刪
+    let (status, body) = delete_account(&s.app, Some(&s.staff), "password123").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("鎖定"), "{body}");
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM users WHERE email = 'b@example.com'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM email_outbox WHERE to_email = 'b@example.com' AND subject LIKE '%鎖定%'").await,
+        1
+    );
+}

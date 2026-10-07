@@ -727,6 +727,89 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
         .0,
         StatusCode::OK
     );
+
+    // 6. 其他新增的函式 / 資料表在受限帳號下的行為
+    // 6a. 店家資訊(update_shop_profile)與顧客預約頁
+    let (status, body) = call(
+        &app,
+        Method::PUT,
+        &format!("/t/{slug}/profile"),
+        Some(json!({"description": "簡介", "address": "台北市", "phone": "02-1234"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, public) = call(
+        &app,
+        Method::GET,
+        &format!("/public/shops/{slug}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(public["address"], "台北市");
+    // 6b. 帳號活動(record_account_event / list_account_events)
+    let (status, events) = call(
+        &app,
+        Method::GET,
+        "/auth/security-events",
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events}");
+    assert_eq!(
+        events.as_array().unwrap().last().unwrap()["kind"],
+        "registered"
+    );
+    // 6c. worker 角色:清理未驗證帳號、清除過期的帳號事件(現有資料都很新,所以不會刪任何東西)
+    {
+        let mut tx = tenant_saas::db::begin_worker(&pool).await.unwrap();
+        let n: i32 = sqlx::query_scalar("SELECT retention_delete_stale_unverified(30, 10)")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("worker 要能清理未驗證帳號");
+        assert_eq!(n, 0);
+        let n: i32 = sqlx::query_scalar("SELECT retention_purge_account_events(180, 10)")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("worker 要能清除過期的帳號事件");
+        assert_eq!(n, 0);
+        tx.commit().await.unwrap();
+    }
+    // 6d. 移交店主(純 tenant_app 的 UPDATE memberships):把原本那家店交給前面加入的員工
+    let (_, invitee_me) = call(&app, Method::GET, "/auth/me", None, Some(&invitee)).await;
+    let (status, body) = call(
+        &app,
+        Method::POST,
+        &format!("/t/{slug}/transfer-ownership"),
+        Some(json!({"user_id": invitee_me["id"], "password": "password123"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "移交店主要能在受限帳號下運作: {body}"
+    );
+    let (_, now) = call(
+        &app,
+        Method::GET,
+        &format!("/t/{slug}/me"),
+        None,
+        Some(&invitee),
+    )
+    .await;
+    assert_eq!(now["role"], "owner");
+    let (_, old) = call(
+        &app,
+        Method::GET,
+        &format!("/t/{slug}/me"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(old["role"], "manager");
 }
 
 fn owner_uuid(me: &Value) -> Uuid {

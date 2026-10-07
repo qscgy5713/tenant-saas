@@ -11,16 +11,21 @@ import {
   changeRole,
   createInvitation,
   deactivateMember,
+  transferOwnership,
   listInvitations,
   reactivateMember,
   removeMember,
   revokeInvitation,
 } from '../api'
+import { TextField } from '../components/AuthCard'
 import { ConfirmDialog, Modal } from '../components/Modal'
-import { canDeactivate, canReactivate, canRemove } from '../permissions'
+import { canDeactivate, canReactivate, canRemove, canTransferOwnership } from '../permissions'
 import { useMembers } from '../queries'
 import { ROLE_LABEL, useShop } from '../ShopContext'
 import type { Member, Role } from '../types'
+
+/** 「停用時的預約改派」下拉選單裡代表「自動分配」的值(不會和使用者 id 撞) */
+const AUTO = '__auto__'
 
 const errorText = (e: unknown) =>
   e instanceof ApiError ? e.message : e ? '操作失敗,請再試一次。' : null
@@ -38,6 +43,8 @@ export function TeamPage() {
   const [inviting, setInviting] = useState(false)
   const [removing, setRemoving] = useState<Member | null>(null)
   const [deactivating, setDeactivating] = useState<Member | null>(null)
+  const [transferring, setTransferring] = useState<Member | null>(null)
+  const [transferPassword, setTransferPassword] = useState('')
   const [revoking, setRevoking] = useState<string | null>(null)
   const [reassignTo, setReassignTo] = useState('')
 
@@ -59,7 +66,12 @@ export function TeamPage() {
     },
   })
   const deactivateMutation = useMutation({
-    mutationFn: (m: Member) => deactivateMember(slug, m.user_id, reassignTo || undefined),
+    mutationFn: (m: Member) =>
+      deactivateMember(
+        slug,
+        m.user_id,
+        reassignTo === AUTO ? { auto: true } : reassignTo ? { to: reassignTo } : undefined,
+      ),
     onSuccess: (_d, m) => {
       setDeactivating(null)
       setReassignTo('')
@@ -69,6 +81,16 @@ export function TeamPage() {
         queryClient.removeQueries({ queryKey: ['admin'] })
         navigate('/admin')
       }
+    },
+  })
+  const transferMutation = useMutation({
+    mutationFn: (m: Member) => transferOwnership(slug, m.user_id, transferPassword),
+    onSuccess: () => {
+      setTransferring(null)
+      setTransferPassword('')
+      // 我的角色變了(店主 → 管理者):店家資料、成員、方案都要重抓,權限立刻跟著變
+      queryClient.invalidateQueries({ queryKey: ['admin', 'shop', slug] })
+      refreshMembers()
     },
   })
   const reactivateMutation = useMutation({
@@ -159,6 +181,15 @@ export function TeamPage() {
                     重新啟用
                   </button>
                 )}
+                {canTransferOwnership({ id: user.id, role }, m) && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setTransferring(m)}
+                  >
+                    移交店主
+                  </button>
+                )}
                 {canDeactivate({ id: user.id, role }, m) && (
                   <button
                     type="button"
@@ -241,6 +272,7 @@ export function TeamPage() {
                 onChange={(e) => setReassignTo(e.target.value)}
               >
                 <option value="">不改派</option>
+                <option value={AUTO}>自動分配給有空的成員</option>
                 {members.data
                   ?.filter((m) => m.active && m.user_id !== deactivating?.user_id)
                   .map((m) => (
@@ -250,7 +282,10 @@ export function TeamPage() {
                   ))}
               </select>
             </label>
-            <p className="field-hint">時間不變,顧客會收到通知信;對方在那些時段必須有空。</p>
+            <p className="field-hint">
+              時間不變,顧客會收到通知信;對方在那些時段必須有空。「自動分配」會逐筆挑那個時段有空的人,
+              任何一筆找不到就整個不停用。
+            </p>
           </div>
         }
         danger
@@ -261,6 +296,32 @@ export function TeamPage() {
           setDeactivating(null)
           setReassignTo('')
           deactivateMutation.reset()
+        }}
+      />
+      <ConfirmDialog
+        open={transferring !== null}
+        title="移交店主身分?"
+        message={`${transferring?.name} 會成為這家店的擁有者(可以管理設定、方案、刪除店家),你會變成管理者。這個動作只有新的擁有者能還原。`}
+        confirmLabel="移交"
+        danger
+        pending={transferMutation.isPending}
+        error={errorText(transferMutation.error)}
+        extra={
+          <TextField label="輸入你的密碼確認">
+            <input
+              name="transfer_password"
+              type="password"
+              autoComplete="current-password"
+              value={transferPassword}
+              onChange={(e) => setTransferPassword(e.target.value)}
+            />
+          </TextField>
+        }
+        onConfirm={() => transferring && transferMutation.mutate(transferring)}
+        onClose={() => {
+          setTransferring(null)
+          setTransferPassword('')
+          transferMutation.reset()
         }}
       />
       <ConfirmDialog

@@ -35,6 +35,7 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/me", get(me))
         .route("/auth/logout", post(logout))
         .route("/auth/logout-all", post(logout_all))
+        .route("/auth/security-events", get(security_events))
         .route("/auth/resend-verification", post(resend_verification))
 }
 
@@ -135,6 +136,7 @@ async fn register(
         Err(err) => return Err(err.into()),
     };
 
+    record_event(&state, user.id, "registered").await;
     // 驗證信寄不出去不該讓註冊失敗(使用者之後可以重寄),但要留下紀錄
     if state.require_verified_email
         && let Err(e) = send_verification(&state, user.id).await
@@ -195,7 +197,9 @@ async fn login(
             .bind(&mail.body)
             .fetch_one(&state.db)
             .await?;
+        record_event(&state, row.id, "login_failed").await;
         if newly_locked {
+            record_event(&state, row.id, "locked").await;
             // 日誌只記使用者 ID,不記 Email
             tracing::warn!(user_id = %row.id, "帳號因連續登入失敗被鎖定");
             metrics::counter!("account_locked_total").increment(1);
@@ -206,6 +210,7 @@ async fn login(
         .bind(row.id)
         .execute(&state.db)
         .await?;
+    record_event(&state, row.id, "login").await;
 
     let token = state.jwt.issue(row.id)?;
     Ok(with_session(
@@ -306,9 +311,12 @@ async fn reset_password(
         .fetch_one(&state.db)
         .await;
     match result {
-        Ok(_) => Ok(Json(Accepted {
-            message: "密碼已更新,請用新密碼登入。",
-        })),
+        Ok(user_id) => {
+            record_event(&state, user_id, "password_reset").await;
+            Ok(Json(Accepted {
+                message: "密碼已更新,請用新密碼登入。",
+            }))
+        }
         Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
         Err(e) => Err(e.into()),
     }
@@ -372,9 +380,12 @@ async fn verify_email(
         .fetch_one(&state.db)
         .await;
     match result {
-        Ok(_) => Ok(Json(Accepted {
-            message: "Email 已驗證,現在可以建立店家了。",
-        })),
+        Ok(user_id) => {
+            record_event(&state, user_id, "email_verified").await;
+            Ok(Json(Accepted {
+                message: "Email 已驗證,現在可以建立店家了。",
+            }))
+        }
         Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
         Err(e) => Err(e.into()),
     }
@@ -389,6 +400,7 @@ async fn logout_all(
         .bind(auth.id)
         .execute(&state.db)
         .await?;
+    record_event(&state, auth.id, "logout_all").await;
     Ok((
         StatusCode::NO_CONTENT,
         AppendHeaders([
@@ -412,13 +424,7 @@ async fn delete_account(
     auth: AuthUser,
     Json(req): Json<DeleteAccountRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
-        .bind(auth.id)
-        .fetch_one(&state.db)
-        .await?;
-    if !verify_password(req.password, hash).await {
-        return Err(AppError::BadRequest("密碼不正確".into()));
-    }
+    confirm_password(&state, auth.id, req.password).await?;
     let result = sqlx::query("SELECT delete_account($1)")
         .bind(auth.id)
         .execute(&state.db)
@@ -443,4 +449,85 @@ async fn delete_account(
             (header::CACHE_CONTROL, "no-store".to_string()),
         ]),
     ))
+}
+
+/// 記一筆帳號層級的安全事件。**記錄失敗不能讓登入 / 註冊等本來的動作失敗**,只留日誌
+async fn record_event(state: &AppState, user_id: Uuid, kind: &str) {
+    if let Err(e) = sqlx::query("SELECT record_account_event($1, $2)")
+        .bind(user_id)
+        .bind(kind)
+        .execute(&state.db)
+        .await
+    {
+        tracing::error!(error = %e, %user_id, kind, "記錄帳號事件失敗");
+    }
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct SecurityEvent {
+    kind: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 我的最近帳號活動(只看得到自己的,最新的在前,最多 50 筆)。
+/// 用途:發現不是自己的登入或一直失敗的嘗試,就知道該改密碼 / 登出所有裝置。
+async fn security_events(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<impl IntoResponse, AppError> {
+    let events: Vec<SecurityEvent> =
+        sqlx::query_as("SELECT kind, created_at FROM list_account_events($1, 50)")
+            .bind(auth.id)
+            .fetch_all(&state.db)
+            .await?;
+    Ok((
+        AppendHeaders([(header::CACHE_CONTROL, "no-store".to_string())]),
+        Json(events),
+    ))
+}
+
+/// 「重新輸入密碼」的確認(刪除帳號、移交店主…):**失敗與登入共用同一套計數與鎖定**。
+///
+/// 這些端點本來就是為了防「被盜用的登入狀態」做危險操作,如果不計入鎖定,持有登入狀態的人就能無限次猜密碼
+/// (猜中了就能刪帳號 / 把店送走)。連續失敗 5 次會鎖定帳號 15 分鐘(登入也一併被擋),並寄通知信。
+/// 錯誤回 400 而不是 401:前端對 401 一律當成登入過期而登出。
+pub(crate) async fn confirm_password(
+    state: &AppState,
+    user_id: Uuid,
+    password: String,
+) -> Result<(), AppError> {
+    let (hash, email, locked): (String, String, bool) = sqlx::query_as(
+        "SELECT password_hash, email::text, COALESCE(locked_until > now(), false)
+         FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if locked {
+        // 鎖定中連正確的密碼都不收(和登入一致),也不繼續計數
+        return Err(AppError::BadRequest(
+            "密碼嘗試次數過多,帳號暫時鎖定,請稍後再試".into(),
+        ));
+    }
+    if !verify_password(password, hash).await {
+        let mail = mail::account_locked(&email);
+        let newly_locked = sqlx::query_scalar::<_, bool>("SELECT login_failed($1, $2, $3)")
+            .bind(user_id)
+            .bind(&mail.subject)
+            .bind(&mail.body)
+            .fetch_one(&state.db)
+            .await?;
+        if newly_locked {
+            tracing::warn!(%user_id, "帳號因重新確認密碼連續失敗被鎖定");
+            metrics::counter!("account_locked_total").increment(1);
+            record_event(state, user_id, "locked").await;
+        }
+        return Err(AppError::BadRequest("密碼不正確".into()));
+    }
+    // 成功就清掉先前的失敗次數(和登入一致)
+    sqlx::query("SELECT login_succeeded($1)")
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    Ok(())
 }

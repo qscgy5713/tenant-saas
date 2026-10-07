@@ -458,6 +458,17 @@ pub async fn reschedule_booking(
     }
 }
 
+/// 這個時間點有空、提供該服務的員工(依序;排除這筆預約自己占的時段),給自動改派用
+pub async fn free_staff_for(
+    tx: &mut Tx,
+    tz: Tz,
+    service: &ServiceInfo,
+    start: DateTime<Utc>,
+    booking_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    staff_free_at(tx, tz, service, start, None, Some(booking_id)).await
+}
+
 /// 改派:同一個服務、同一個時間,換一位員工負責。
 /// 新員工必須在那個時段真的有空(營業時間、休假、既有預約、整理時間、提供此服務都算在內)。
 pub async fn reassign_booking(

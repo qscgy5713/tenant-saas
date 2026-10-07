@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # 每週跑一次:漏洞資料庫每天更新,程式沒動也可能出現新的漏洞
+  schedule:
+    - cron: "0 3 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -125,7 +128,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
         working-directory: web
       - run: npm run e2e
         working-directory: web
@@ -154,8 +157,39 @@ jobs:
         with:
           context: ${{ matrix.context }}
           push: false
+          load: true
+          tags: tenant-saas-${{ matrix.name }}:ci
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      # 映像漏洞掃描:有「已有修正版」的 HIGH / CRITICAL 就失敗(沒有修正版的無從處理,不擋)
+      - name: 漏洞掃描(Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.75.0 \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            tenant-saas-${{ matrix.name }}:ci
+      # SBOM(CycloneDX):映像裡有哪些套件,供稽核與日後出現漏洞時比對
+      - name: 產生 SBOM
+        run: |
+          mkdir -p sbom
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/sbom:/out" aquasec/trivy:0.75.0 \
+            image --format cyclonedx --output /out/sbom-${{ matrix.name }}.cdx.json --no-progress \
+            tenant-saas-${{ matrix.name }}:ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.name }}
+          path: sbom/
+          retention-days: 90
+
+  # 依賴(Cargo.lock、package-lock.json)的已知漏洞
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 依賴漏洞掃描(Trivy)
+        run: |
+          docker run --rm -v "$PWD:/src:ro" aquasec/trivy:0.75.0 \
+            fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            --skip-dirs target --skip-dirs node_modules --skip-dirs web/node_modules /src
 
   # 部署範例本身要能用:告警規則語法與行為、compose 檔能解析
   deploy-config:

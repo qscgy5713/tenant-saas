@@ -4,6 +4,7 @@ import type {
   AdminBooking,
   AdminService,
   AuditPage,
+  AccountEvent,
   AuthResponse,
   Billing,
   BookingQuery,
@@ -185,11 +186,35 @@ export const removeMember = (slug: string, userId: string) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}`, { method: 'DELETE' })
 
 /** 停用(離職):保留歷史紀錄;還有未來已確認的預約時後端會拒絕 */
-export const deactivateMember = (slug: string, userId: string, reassignTo?: string) =>
+/** 停用成員。`reassign`:把未來預約整批給某人(`{ to }`),或逐筆自動分配(`{ auto: true }`);不帶就要先處理完預約 */
+export const deactivateMember = (
+  slug: string,
+  userId: string,
+  reassign?: { to?: string; auto?: boolean },
+) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}/deactivate`, {
     method: 'POST',
-    ...(reassignTo ? { body: JSON.stringify({ reassign_to: reassignTo }) } : {}),
+    ...(reassign?.to || reassign?.auto
+      ? {
+          body: JSON.stringify(
+            reassign.to ? { reassign_to: reassign.to } : { auto_reassign: true },
+          ),
+        }
+      : {}),
   })
+
+/** 移交店主身分(僅店主,要輸入密碼):對方變成擁有者,自己降為管理者 */
+export const transferOwnership = (slug: string, userId: string, password: string) =>
+  api<void>(`/t/${enc(slug)}/transfer-ownership`, json({ user_id: userId, password }))
+
+/** 修改顧客預約頁上的店家資訊(僅店主);整組取代,空字串 = 清除 */
+export const setShopProfile = (
+  slug: string,
+  body: { description: string; address: string; phone: string },
+) => call<ShopDetail>(`/t/${enc(slug)}/profile`, send('PUT', body))
+
+/** 我的最近帳號活動(登入、失敗、鎖定…) */
+export const listAccountEvents = () => call<AccountEvent[]>('/auth/security-events')
 
 export const reactivateMember = (slug: string, userId: string) =>
   call<void>(`/t/${enc(slug)}/members/${enc(userId)}/reactivate`, { method: 'POST' })

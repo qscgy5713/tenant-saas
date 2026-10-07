@@ -125,6 +125,9 @@ async fn open_by_token(state: &AppState, raw: &str) -> Result<(Tx, Uuid, Tz), Ap
 struct Shop {
     name: String,
     timezone: String,
+    description: Option<String>,
+    address: Option<String>,
+    phone: Option<String>,
 }
 
 async fn shop(
@@ -132,13 +135,26 @@ async fn shop(
     Path(slug): Path<String>,
 ) -> Result<Json<Shop>, AppError> {
     let (mut tx, tenant_id, _) = open_shop(&state, &slug).await?;
-    let (name, timezone): (String, String) =
-        sqlx::query_as("SELECT name, timezone FROM tenants WHERE id = $1")
-            .bind(tenant_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (name, timezone, description, address, phone): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT name, timezone, description, address, phone FROM tenants WHERE id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.rollback().await?;
-    Ok(Json(Shop { name, timezone }))
+    Ok(Json(Shop {
+        name,
+        timezone,
+        description,
+        address,
+        phone,
+    }))
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -258,7 +274,7 @@ async fn booking_availability(
     let (mut tx, _, tz) = open_by_token(&state, &raw).await?;
     let row: Option<(Uuid, Uuid, Uuid, BookingStatus)> = sqlx::query_as(
         "SELECT id, service_id, staff_user_id, status FROM bookings
-         WHERE manage_token_hash = $1 OR reminder_token_hash = $1",
+         WHERE manage_token_hash = $1 OR reminder_token_hashes @> ARRAY[$1]::text[]",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -460,7 +476,7 @@ async fn load_by_token(tx: &mut Tx, raw: &str) -> Result<PublicBooking, AppError
          JOIN services s ON s.id = b.service_id
          JOIN users u ON u.id = b.staff_user_id
          JOIN customers c ON c.id = b.customer_id
-         WHERE b.manage_token_hash = $1 OR b.reminder_token_hash = $1",
+         WHERE b.manage_token_hash = $1 OR b.reminder_token_hashes @> ARRAY[$1]::text[]",
     )
     .bind(token::hash(raw))
     .fetch_optional(&mut **tx)
@@ -504,7 +520,7 @@ async fn booking_ics(
          JOIN tenants t ON t.id = b.tenant_id
          JOIN services s ON s.id = b.service_id
          JOIN users u ON u.id = b.staff_user_id
-         WHERE b.manage_token_hash = $1 OR b.reminder_token_hash = $1",
+         WHERE b.manage_token_hash = $1 OR b.reminder_token_hashes @> ARRAY[$1]::text[]",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -567,7 +583,7 @@ async fn confirm_booking(
         staff_id,
     } = sqlx::query_as::<_, PendingRow>(
         "SELECT id, status, starts_at, created_at, service_id, staff_user_id AS staff_id
-         FROM bookings WHERE manage_token_hash = $1 OR reminder_token_hash = $1 FOR UPDATE",
+         FROM bookings WHERE manage_token_hash = $1 OR reminder_token_hashes @> ARRAY[$1]::text[] FOR UPDATE",
     )
     .bind(token::hash(&raw))
     .fetch_optional(&mut *tx)
@@ -733,7 +749,7 @@ async fn lock_changeable(
 ) -> Result<(Uuid, Uuid, Uuid, BookingStatus), AppError> {
     let row: Option<(Uuid, Uuid, Uuid, BookingStatus, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, service_id, staff_user_id, status, starts_at FROM bookings
-         WHERE manage_token_hash = $1 OR reminder_token_hash = $1 FOR UPDATE",
+         WHERE manage_token_hash = $1 OR reminder_token_hashes @> ARRAY[$1]::text[] FOR UPDATE",
     )
     .bind(token::hash(raw))
     .fetch_optional(&mut **tx)

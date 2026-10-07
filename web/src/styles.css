@@ -250,6 +250,20 @@ a {
   letter-spacing: -0.01em;
 }
 
+.hero-desc {
+  margin: 4px 0 8px;
+  white-space: pre-line;
+  color: var(--text);
+}
+.shop-contact {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  font-size: 0.92rem;
+}
+.shop-contact li {
+  margin: 2px 0;
+}
 .hero-sub {
   margin-top: 6px;
   color: var(--muted);

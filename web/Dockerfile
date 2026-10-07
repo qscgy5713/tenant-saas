@@ -10,6 +10,8 @@ RUN npm run build
 
 # ---- 執行:nginx 提供靜態檔,並代理 /api/ 到後端 ----
 FROM nginx:1.27-alpine
+# 釘住的次版本會讓基底的 Alpine 套件落後:建置時升級已有的套件(CI 的漏洞掃描會檢查)
+RUN apk upgrade --no-cache
 COPY --from=build /app/dist /usr/share/nginx/html
 # 官方映像會把 /etc/nginx/templates/*.template 以環境變數展開成 /etc/nginx/conf.d/
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template

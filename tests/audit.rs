@@ -671,6 +671,101 @@ async fn system_cancellations_record_the_reason(pool: PgPool) {
     assert_eq!(reasons, vec!["confirmation_expired", "no_longer_bookable"]);
 }
 
+/// slot_taken 是「兩個確認真正同時發生」才會走到的路徑(確認前的重新檢查通過了,但寫入時被排除約束擋下)。
+/// 要確定性地重現:用資料庫 trigger,在這筆預約被改成已確認的瞬間、同一個交易內先塞入一筆衝突的預約,
+/// 模擬「檢查之後、寫入之前,別人搶先占住了」。
+#[sqlx::test]
+async fn losing_the_race_to_the_exclusion_constraint_cancels_with_slot_taken(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    let req = request(&s, at(day(3), 10, 0), "c@example.com").await;
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    let token = token_in(
+        &memory
+            .sent()
+            .into_iter()
+            .find(|m| m.to == "c@example.com")
+            .unwrap()
+            .body,
+    );
+    let id = req["id"].as_str().unwrap();
+
+    sqlx::query(
+        "CREATE FUNCTION steal_slot() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.status = 'confirmed' AND OLD.status = 'pending' THEN
+                 INSERT INTO bookings (tenant_id, staff_user_id, service_id, customer_id,
+                                       starts_at, ends_at, blocked_until, status, manage_token_hash)
+                 VALUES (OLD.tenant_id, OLD.staff_user_id, OLD.service_id, OLD.customer_id,
+                         OLD.starts_at, OLD.ends_at, OLD.blocked_until, 'confirmed',
+                         'stolen-' || gen_random_uuid()::text);
+             END IF;
+             RETURN NEW;
+         END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER steal_slot BEFORE UPDATE ON bookings
+         FOR EACH ROW EXECUTE FUNCTION steal_slot()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/confirm"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("已被其他人預約"),
+        "{body}"
+    );
+
+    // 這筆被自動取消,原因是 slot_taken(系統做的);那筆「搶先的」預約隨 savepoint 一起回滾,沒有殘留
+    sqlx::query("DROP TRIGGER steal_slot ON bookings")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let status: String =
+        sqlx::query_scalar("SELECT status::text FROM bookings WHERE id = $1::uuid")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "cancelled");
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM bookings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 1, "搶先的那筆不該留下來");
+    let logged = logs(
+        &s.app,
+        &s.owner,
+        "shop-a",
+        "action=booking.cancelled&limit=100",
+    )
+    .await;
+    let items = logged["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{logged}");
+    assert_eq!(items[0]["actor_type"], "system");
+    assert_eq!(items[0]["detail"]["reason"], "slot_taken");
+    // 沒有寄出「預約已確認」的信
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    assert!(
+        !memory
+            .sent()
+            .iter()
+            .any(|m| m.subject.contains("預約已確認"))
+    );
+}
+
 #[sqlx::test]
 async fn staff_can_cancel_a_pending_booking_but_not_complete_it(pool: PgPool) {
     let s = shop(&pool).await;

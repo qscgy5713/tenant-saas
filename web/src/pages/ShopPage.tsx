@@ -5,6 +5,7 @@ import { Avatar } from '../components/Avatar'
 import { ArrowRightIcon, ClockIcon } from '../components/Icons'
 import { Shell } from '../components/Shell'
 import { formatDuration, formatPrice } from '../lib/money'
+import { telHref } from '../lib/phone'
 import { ApiError } from '../api/client'
 
 export function ShopPage() {
@@ -39,6 +40,29 @@ export function ShopPage() {
         <Avatar name={shop.data.name} size="lg" />
         <div>
           <h1>{shop.data.name}</h1>
+          {shop.data.description && <p className="hero-desc">{shop.data.description}</p>}
+          {(shop.data.address || shop.data.phone) && (
+            <ul className="shop-contact" aria-label="店家聯絡資訊">
+              {shop.data.address && (
+                <li>
+                  <span className="muted">地址</span>{' '}
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(shop.data.address)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {shop.data.address}
+                  </a>
+                </li>
+              )}
+              {shop.data.phone && (
+                <li>
+                  <span className="muted">電話</span>{' '}
+                  <a href={telHref(shop.data.phone)}>{shop.data.phone}</a>
+                </li>
+              )}
+            </ul>
+          )}
           <p className="hero-sub">選擇服務,挑一個方便的時間,幾個步驟就完成預約。</p>
           <ul className="hero-chips" aria-label="預約說明">
             <li>不用註冊</li>

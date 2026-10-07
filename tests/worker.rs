@@ -1226,7 +1226,7 @@ async fn reminder_link_manages_the_booking_without_replacing_the_confirmation_li
 
     // 資料庫只存雜湊:原始 token 不在任何欄位,寄出後信件內容也被清掉
     let (hash, body): (String, String) = sqlx::query_as(
-        "SELECT b.reminder_token_hash, (SELECT body FROM email_outbox LIMIT 1) FROM bookings b",
+        "SELECT b.reminder_token_hashes[1], (SELECT body FROM email_outbox LIMIT 1) FROM bookings b",
     )
     .fetch_one(&pool)
     .await
@@ -1300,9 +1300,10 @@ async fn reminder_link_manages_the_booking_without_replacing_the_confirmation_li
     assert_eq!(get(confirmation).await.1["status"], "cancelled");
 }
 
-/// 提醒信的連結能改期;改期後重新提醒時發新的 token,上一封提醒信的連結失效(確認信的連結不受影響)
+/// 提醒信的連結能改期;改期後重新提醒時發新的 token,上一封提醒信的連結**仍然有效**(確認信的連結一直有效,
+/// 讓舊提醒連結失效沒有換到任何安全性,只會讓顧客點舊信時看到「找不到」)
 #[sqlx::test]
-async fn a_new_reminder_after_rescheduling_replaces_the_old_reminder_link(pool: PgPool) {
+async fn a_new_reminder_after_rescheduling_keeps_the_old_reminder_link_working(pool: PgPool) {
     let s = shop(&pool).await;
     let (mailer, memory) = mailer();
     let confirmation = confirmed_booking_in_20h(&s, &pool).await;
@@ -1365,14 +1366,45 @@ async fn a_new_reminder_after_rescheduling_replaces_the_old_reminder_link(pool: 
     assert_eq!(get(&second).await, StatusCode::OK);
     assert_eq!(
         get(&first).await,
-        StatusCode::NOT_FOUND,
-        "上一封提醒信的連結失效"
+        StatusCode::OK,
+        "上一封提醒信的連結仍然有效"
     );
     assert_eq!(
         get(&confirmation).await,
         StatusCode::OK,
         "確認信的連結一直有效"
     );
+}
+
+/// 提醒連結最多保留最近 10 個:超過時丟掉最舊的,新的接在最後(不會無限成長)
+#[sqlx::test]
+async fn only_the_ten_most_recent_reminder_links_are_kept(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (mailer, memory) = mailer();
+    confirmed_booking_in_20h(&s, &pool).await;
+    sqlx::query(
+        "UPDATE bookings SET reminder_token_hashes =
+            ARRAY['h1','h2','h3','h4','h5','h6','h7','h8','h9','h10'], reminder_queued_at = NULL",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tick(&pool, &mailer, "http://app.test")
+            .await
+            .unwrap()
+            .reminders,
+        1
+    );
+    let newest = token_in(&memory.sent()[0].body);
+    let hashes: Vec<String> =
+        sqlx::query_scalar("SELECT unnest(reminder_token_hashes) FROM bookings")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(hashes.len(), 10);
+    assert_eq!(hashes[0], "h2", "最舊的 h1 被丟掉");
+    assert_eq!(hashes[9], tenant_saas::token::hash(&newest));
 }
 
 /// 20 小時後開始、3 天前確認的預約(符合提醒條件)。回傳確認信連結的原始 token

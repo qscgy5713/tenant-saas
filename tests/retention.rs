@@ -749,6 +749,98 @@ async fn requesting_deletion_waits_for_bookings_being_created(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn stale_unverified_accounts_are_deleted_and_the_email_is_freed(pool: PgPool) {
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    let insert = |email: &'static str, verified: bool, age_days: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO users (email, password_hash, name, created_at, email_verified_at)
+                 VALUES ($1, 'x', '測試', now() - make_interval(days => $3),
+                         CASE WHEN $2 THEN now() ELSE NULL END) RETURNING id",
+            )
+            .bind(email)
+            .bind(verified)
+            .bind(age_days)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let stale = insert("stale@example.com", false, 40).await;
+    let _fresh = insert("fresh@example.com", false, 5).await;
+    let _old_verified = insert("old-verified@example.com", true, 400).await;
+    let member = insert("member@example.com", false, 40).await;
+    sqlx::query(
+        "INSERT INTO memberships (tenant_id, user_id, role) SELECT id, $1, 'staff' FROM tenants",
+    )
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 它的驗證連結、重設密碼連結與待寄信件
+    sqlx::query("INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, 'h1', now() + interval '1 day')")
+        .bind(stale)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO email_outbox (tenant_id, to_email, subject, body) VALUES (NULL, 'stale@example.com', '驗證', 'x')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let stats = retention_sweep(&pool, Some(730)).await;
+    assert_eq!(stats.unverified_deleted, 1);
+    let left: Vec<String> = sqlx::query_scalar(
+        "SELECT email::text FROM users WHERE email LIKE '%@example.com' ORDER BY email",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        left,
+        [
+            "a@example.com",
+            "fresh@example.com",
+            "member@example.com",
+            "old-verified@example.com"
+        ]
+    );
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM email_verifications").await,
+        0
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM email_outbox WHERE to_email = 'stale@example.com'"
+        )
+        .await,
+        0
+    );
+    // 被占住的 Email 釋出了:真正的主人可以註冊
+    assert_eq!(
+        common::register(&s.app, "stale@example.com", "password123")
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn stale_account_cleanup_refuses_a_period_that_would_hit_new_signups(pool: PgPool) {
+    shop(&pool, "shop-a", "a@example.com").await;
+    let err = sqlx::query("SELECT retention_delete_stale_unverified(1, 10)")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("22023")
+    );
+}
+
+#[sqlx::test]
 async fn an_active_subscription_blocks_deletion(pool: PgPool) {
     let s = shop(&pool, "shop-a", "a@example.com").await;
     sqlx::query(

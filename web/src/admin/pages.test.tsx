@@ -1156,7 +1156,7 @@ describe('團隊', () => {
       const names = within(pick)
         .getAllByRole('option')
         .map((o) => o.textContent)
-      expect(names).toEqual(['不改派', '林美玲']) // 不含自己、不含已停用的人
+      expect(names).toEqual(['不改派', '自動分配給有空的成員', '林美玲']) // 不含自己、不含已停用的人
       await user.click(within(dialog).getByRole('button', { name: '停用' }))
       await waitFor(() => expect(s.calls).toHaveLength(1))
       expect(s.calls[0].body?.reassign_to).toBeUndefined()
@@ -1167,6 +1167,114 @@ describe('團隊', () => {
       await user.click(within(dialog).getByRole('button', { name: '停用' }))
       await waitFor(() => expect(s.calls).toHaveLength(2))
       expect(s.calls[1].body).toEqual({ reassign_to: 'u-owner' })
+    })
+
+    it('選「自動分配」:送出 auto_reassign,不帶 reassign_to', async () => {
+      mockShopMe('owner')
+      serve(() => roster())
+      const s = spy<{ reassign_to?: string; auto_reassign?: boolean }>()
+      server.use(
+        http.post(`${API}/t/demo-salon/members/u-staff/deactivate`, async ({ request }) => {
+          await s.record(request)
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      await user.click(
+        within((await screen.findByText('小安')).closest('li')!).getByRole('button', {
+          name: '停用',
+        }),
+      )
+      const dialog = await screen.findByRole('dialog')
+      await user.selectOptions(
+        within(dialog).getByRole('combobox', { name: /改派給/ }),
+        '自動分配給有空的成員',
+      )
+      await user.click(within(dialog).getByRole('button', { name: '停用' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ auto_reassign: true })
+    })
+
+    it('移交店主:只有店主看得到按鈕、不能移交給自己或停用的人;要輸入密碼;成功後重抓我的角色', async () => {
+      mockShopMe('owner')
+      let owner = 'u-owner'
+      serve(() => [
+        member({
+          user_id: 'u-owner',
+          name: '林美玲',
+          email: 'owner@demo.example.com',
+          role: 'owner',
+        }),
+        member({ user_id: 'u-mgr', name: '經理', role: 'manager' }),
+        member({ user_id: 'u-gone', name: '離職的人', role: 'staff', active: false }),
+      ])
+      const s = spy<{ user_id?: string; password?: string }>()
+      server.use(
+        http.post(`${API}/t/demo-salon/transfer-ownership`, async ({ request }) => {
+          await s.record(request)
+          owner = 'u-mgr'
+          return new HttpResponse(null, { status: 204 })
+        }),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      const mgr = (await screen.findByText('經理')).closest('li')!
+      expect(
+        within(screen.getByText('owner@demo.example.com').closest('li')!).queryByRole('button', {
+          name: '移交店主',
+        }),
+      ).not.toBeInTheDocument()
+      expect(
+        within(screen.getByText('離職的人').closest('li')!).queryByRole('button', {
+          name: '移交店主',
+        }),
+      ).not.toBeInTheDocument()
+
+      await user.click(within(mgr).getByRole('button', { name: '移交店主' }))
+      const dialog = await screen.findByRole('dialog')
+      expect(s.calls).toHaveLength(0) // 還沒確認
+      await user.type(within(dialog).getByLabelText('輸入你的密碼確認'), 'my-password-1')
+      await user.click(within(dialog).getByRole('button', { name: '移交' }))
+      await waitFor(() => expect(s.calls).toHaveLength(1))
+      expect(s.calls[0].body).toEqual({ user_id: 'u-mgr', password: 'my-password-1' })
+      expect(owner).toBe('u-mgr')
+    })
+
+    it('移交被拒絕(密碼不對)→ 原因顯示在視窗裡,視窗不關', async () => {
+      mockShopMe('owner')
+      serve(() => [
+        member({
+          user_id: 'u-owner',
+          name: '林美玲',
+          email: 'owner@demo.example.com',
+          role: 'owner',
+        }),
+        member({ user_id: 'u-mgr', name: '經理', role: 'manager' }),
+      ])
+      server.use(
+        http.post(`${API}/t/demo-salon/transfer-ownership`, () => error(400, '密碼不正確')),
+      )
+      renderApp('/admin/demo-salon/team')
+      const user = userEvent.setup()
+      await user.click(
+        within((await screen.findByText('經理')).closest('li')!).getByRole('button', {
+          name: '移交店主',
+        }),
+      )
+      const dialog = await screen.findByRole('dialog')
+      await user.type(within(dialog).getByLabelText('輸入你的密碼確認'), 'wrong-password')
+      await user.click(within(dialog).getByRole('button', { name: '移交' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('密碼不正確')
+      expect(dialog).toHaveAttribute('open')
+    })
+
+    it('manager 看不到「移交店主」', async () => {
+      mockShopMe('manager')
+      serve(() => roster())
+      renderApp('/admin/demo-salon/team')
+      const row = (await screen.findByText('小安')).closest('li')!
+      expect(within(row).queryByRole('button', { name: '移交店主' })).not.toBeInTheDocument()
     })
 
     it('重新啟用:送出後恢復;名額不足(402)時顯示原因', async () => {
@@ -1771,6 +1879,60 @@ describe('店家設定', () => {
     await user.type(name, '森林系髮廊2')
     await user.click(within(profile).getByRole('button', { name: '儲存' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('不支援的時區')
+  })
+})
+
+describe('店家資訊', () => {
+  it('帶出目前的值;驗證長度與電話格式;只有變了才能儲存;整組送出', async () => {
+    mockShopMe('owner')
+    let current = {
+      ...SHOP('owner'),
+      description: '自然捲專門',
+      address: '台北市',
+      phone: '02-1234',
+    }
+    const s = spy<{ description?: string; address?: string; phone?: string }>()
+    server.use(
+      http.get(`${API}/t/demo-salon/me`, () => HttpResponse.json(current)),
+      http.put(`${API}/t/demo-salon/profile`, async ({ request }) => {
+        const body = (await request.clone().json()) as typeof current
+        await s.record(request)
+        current = { ...current, ...body }
+        return HttpResponse.json(current)
+      }),
+    )
+    renderApp('/admin/demo-salon/settings')
+    const user = userEvent.setup()
+    const phone = await screen.findByLabelText('電話')
+    const form = phone.closest('form')!
+    const save = within(form).getByRole('button', { name: '儲存' })
+    expect(within(form).getByLabelText('店家簡介')).toHaveValue('自然捲專門')
+    expect(within(form).getByLabelText('地址')).toHaveValue('台北市')
+    expect(save).toBeDisabled() // 沒改
+
+    await user.clear(phone)
+    await user.type(phone, 'tel:abc')
+    expect(within(form).getByText(/只能包含數字/)).toBeInTheDocument()
+    expect(save).toBeDisabled()
+
+    await user.clear(phone)
+    await user.type(phone, '+886 2-9999 #5')
+    await user.clear(within(form).getByLabelText('地址'))
+    await user.click(save)
+    await waitFor(() => expect(s.calls).toHaveLength(1))
+    expect(s.calls[0].body).toEqual({
+      description: '自然捲專門',
+      address: '',
+      phone: '+886 2-9999 #5',
+    })
+    expect(await within(form).findByText('已儲存。')).toBeInTheDocument()
+  })
+
+  it('只有店主看得到(管理者直接開設定頁是沒有權限)', async () => {
+    mockShopMe('manager')
+    renderApp('/admin/demo-salon/settings')
+    expect(await screen.findByRole('heading', { name: '沒有權限' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('店家簡介')).not.toBeInTheDocument()
   })
 })
 

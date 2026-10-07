@@ -24,6 +24,7 @@ pub fn routes() -> Router<AppState> {
         .route("/t/{slug}", patch(update_tenant))
         .route("/t/{slug}/me", get(tenant_me))
         .route("/t/{slug}/data-retention", put(set_data_retention))
+        .route("/t/{slug}/profile", put(set_profile))
         .route(
             "/t/{slug}/deletion",
             post(request_deletion).delete(cancel_deletion),
@@ -174,10 +175,15 @@ struct TenantMeResponse {
     customer_retention_days: i32,
     /// 申請刪除後預定刪除的時間;沒有申請時為 null
     deletion_scheduled_at: Option<DateTime<Utc>>,
+    /// 顧客預約頁上顯示的店家資訊(都是選填)
+    description: Option<String>,
+    address: Option<String>,
+    phone: Option<String>,
 }
 
 const TENANT_ME_SQL: &str = "SELECT id, slug, name, timezone, $1::member_role AS role,
-        customer_retention_days, deletion_scheduled_at FROM tenants WHERE id = $2";
+        customer_retention_days, deletion_scheduled_at, description, address, phone
+        FROM tenants WHERE id = $2";
 
 async fn tenant_me(
     State(state): State<AppState>,
@@ -426,6 +432,71 @@ async fn cancel_deletion(
     if !cancelled {
         return Err(AppError::Conflict("這家店沒有在申請刪除".into()));
     }
+    let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
+        .bind(ctx.role)
+        .bind(ctx.tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(row))
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileRequest {
+    description: Option<String>,
+    address: Option<String>,
+    phone: Option<String>,
+}
+
+/// 清理一個選填的文字欄位:去頭尾空白、空字串視為清除、不得含控制字元(換行只有簡介可以有)
+fn clean_profile_field(
+    raw: Option<String>,
+    label: &str,
+    max: usize,
+    allow_newlines: bool,
+) -> Result<Option<String>, AppError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let v = raw.trim().to_string();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if v.chars().count() > max {
+        return Err(AppError::BadRequest(format!("{label}最多 {max} 字")));
+    }
+    if v.chars()
+        .any(|c| c.is_control() && !(allow_newlines && (c == '\n' || c == '\r')))
+    {
+        return Err(AppError::BadRequest(format!("{label}含有不允許的字元")));
+    }
+    Ok(Some(v))
+}
+
+/// 修改顧客預約頁上的店家資訊(僅店主)。整組取代:沒帶或空字串 = 清除。
+/// 電話只允許數字與 `+ - ( ) # 空白` —— 預約頁會把它做成 `tel:` 連結,不能讓任意文字進到連結裡
+async fn set_profile(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Json(req): Json<ProfileRequest>,
+) -> Result<Json<TenantMeResponse>, AppError> {
+    ctx.require_owner()?;
+    let description = clean_profile_field(req.description, "店家簡介", 500, true)?;
+    let address = clean_profile_field(req.address, "地址", 200, false)?;
+    let phone = clean_profile_field(req.phone, "電話", 30, false)?;
+    if phone.as_ref().is_some_and(|p| {
+        !p.chars()
+            .all(|c| c.is_ascii_digit() || "+-()# ".contains(c))
+    }) {
+        return Err(AppError::BadRequest(
+            "電話只能包含數字與 + - ( ) # 空白".into(),
+        ));
+    }
+    let mut tx = ctx.begin(&state).await?;
+    sqlx::query("SELECT update_shop_profile($1, $2, $3)")
+        .bind(&description)
+        .bind(&address)
+        .bind(&phone)
+        .execute(&mut *tx)
+        .await?;
     let row = sqlx::query_as::<_, TenantMeResponse>(TENANT_ME_SQL)
         .bind(ctx.role)
         .bind(ctx.tenant_id)

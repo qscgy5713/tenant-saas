@@ -25,7 +25,17 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // WebKit(Safari 引擎)只跑最關鍵的流程(登入 cookie / CSRF / 顧客預約):每個瀏覽器的 cookie 與表單行為略有不同,
+    // 全部測試都跑兩遍太慢,而且 UI 邏輯是同一份程式。
+    // Firefox 還沒加:在作者的開發機上無法啟動(瀏覽器程序一啟動就退出,與專案無關),所以無法驗證,不放進 CI
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
+      testMatch: /(auth|booking-journey)\.spec\.ts/,
+    },
+  ],
   webServer: [
     {
       // CI 事先建置好,直接執行二進位檔;本機用 cargo run

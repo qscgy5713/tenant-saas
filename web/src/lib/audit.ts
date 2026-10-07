@@ -41,6 +41,9 @@ const ACTION_LABEL: Record<string, string> = {
   'tenant.deletion_requested': '申請刪除店家',
   'tenant.deletion_cancelled': '取消刪除店家',
   'audit.purged': '清除過期的稽核紀錄',
+  'ownership.transferred': '移交店主身分',
+  'tenant.profile_updated': '修改店家資訊',
+  'member.account_deleted': '刪除帳號',
 }
 
 const ROLE: Record<string, string> = { owner: '擁有者', manager: '管理者', staff: '員工' }
@@ -110,6 +113,15 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
       return str(d.scheduled_at)
         ? `預定 ${formatDateTime(str(d.scheduled_at)!, timeZone)} 永久刪除`
         : null
+    case 'tenant.profile_updated': {
+      const changed = Array.isArray(d.changed) ? d.changed.filter((x) => typeof x === 'string') : []
+      const names: Record<string, string> = { description: '簡介', address: '地址', phone: '電話' }
+      return changed.length
+        ? `修改了${changed.map((c) => names[c] ?? c).join('、')}`
+        : '沒有實際變更'
+    }
+    case 'tenant.deletion_cancelled':
+      return d.reason === 'live_bookings' ? '到期時仍有未來預約,系統自動取消刪除' : null
     case 'audit.purged':
       return num(d.rows) !== null ? `清除 ${num(d.rows)} 筆超過保留期限的紀錄` : null
     case 'member.role_changed':

@@ -116,6 +116,16 @@ async fn unverified_users_cannot_open_a_shop_until_they_click_the_link(pool: PgP
     let raw = latest_token(&pool, "a@example.com", "驗證").await;
     assert_eq!(verify(&app, &raw).await.0, StatusCode::OK);
     assert_eq!(me(&app, &token).await.1["email_verified"], true);
+    // 驗證成功會記在帳號活動裡
+    let (_, events) = call(
+        &app,
+        Method::GET,
+        "/auth/security-events",
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(events[0]["kind"], "email_verified", "{events}");
     assert_eq!(
         create_tenant(&app, &token, "shop-a").await.0,
         StatusCode::CREATED

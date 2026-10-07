@@ -7,13 +7,15 @@ import { ArrowRightIcon, LogOutIcon, PlusIcon } from '../../components/Icons'
 import { ErrorState, Loading, Notice } from '../../components/States'
 import { useTitle } from '../../lib/useTitle'
 import { validateName, validateSlug } from '../../lib/validate'
-import { createShop, listShops, resendVerification } from '../api'
+import { createShop, listAccountEvents, listShops, resendVerification } from '../api'
 import { ConfirmDialog, Modal } from '../components/Modal'
 import { TextField } from '../components/AuthCard'
 import { useDeleteAccount, useLogout, useLogoutAll } from '../logout'
 import { TIMEZONES } from '../timezones'
 import { ROLE_LABEL } from '../ShopContext'
 import { restoreSession, useSession } from '../session'
+import { formatDateTime, tzLabel } from '../../lib/time'
+import type { AccountEvent } from '../types'
 
 export function ShopsPage() {
   useTitle('選擇店家 · 店家後台')
@@ -93,6 +95,7 @@ export function ShopsPage() {
       )}
 
       <CreateShopModal open={creating} onClose={() => setCreating(false)} />
+      <AccountActivity />
       <p className="shops-foot">
         <button type="button" className="link-btn" onClick={() => setDeletingAccount(true)}>
           刪除我的帳號
@@ -271,5 +274,47 @@ function CreateShopModal({ open, onClose }: { open: boolean; onClose: () => void
         </div>
       </form>
     </Modal>
+  )
+}
+
+const EVENT_LABEL: Record<AccountEvent['kind'], string> = {
+  registered: '建立帳號',
+  login: '登入',
+  login_failed: '登入失敗(密碼錯誤)',
+  locked: '連續失敗,帳號暫時鎖定',
+  logout_all: '登出所有裝置',
+  password_reset: '重設密碼',
+  email_verified: '驗證 Email',
+}
+
+/** 最近的帳號活動:看到不是自己的登入或一直失敗的嘗試,就該改密碼 / 登出所有裝置 */
+function AccountActivity() {
+  // 帳號不屬於任何店家,沒有「店家時區」:用瀏覽器的時區顯示,並標明
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const events = useQuery({
+    queryKey: ['admin', 'account-events'],
+    queryFn: listAccountEvents,
+  })
+  return (
+    <details className="account-activity">
+      <summary>最近的帳號活動</summary>
+      {events.isPending && <Loading label="載入中…" />}
+      {events.isError && <ErrorState error={events.error} onRetry={() => events.refetch()} />}
+      {events.data?.length === 0 && <p className="muted small">沒有紀錄。</p>}
+      <ul className="rows">
+        {events.data?.map((e, i) => (
+          <li key={i} className="row">
+            <div className="row-main">
+              <div className="row-title">{EVENT_LABEL[e.kind] ?? e.kind}</div>
+              <div className="row-sub">{formatDateTime(e.created_at, timeZone)}</div>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p className="muted small">
+        如果看到不是你做的登入或一直失敗的嘗試,請改密碼並「登出所有裝置」。時間以你的瀏覽器時區(
+        {tzLabel(timeZone)})顯示。
+      </p>
+    </details>
   )
 }

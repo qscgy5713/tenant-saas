@@ -35,6 +35,7 @@ pub fn routes() -> Router<AppState> {
             "/t/{slug}/members/{user_id}",
             patch(change_role).delete(remove_member),
         )
+        .route("/t/{slug}/transfer-ownership", post(transfer_ownership))
         .route(
             "/t/{slug}/members/{user_id}/deactivate",
             post(deactivate_member),
@@ -399,6 +400,9 @@ async fn remove_member(
 struct DeactivateBody {
     /// 把未來已確認的預約改派給這位員工(整批,任何一筆排不進去就整個不停用)
     reassign_to: Option<Uuid>,
+    /// 逐筆自動分配給「那個時段有空、提供該服務」的其他在職成員(不能和 `reassign_to` 同時用)
+    #[serde(default)]
+    auto_reassign: bool,
 }
 
 /// 停用成員(離職):有預約紀錄的成員不能刪除,改成停用。
@@ -414,12 +418,21 @@ async fn deactivate_member(
 ) -> Result<StatusCode, AppError> {
     // 前端的 fetch 一律帶 JSON 的 Content-Type,沒有改派時 body 是空的:空 body 視為沒帶,
     // 不能用 Option<Json>(它對「有 Content-Type 但 body 為空」會直接拒絕)
-    let reassign_to = if body.is_empty() {
-        None
+    let parsed = if body.is_empty() {
+        DeactivateBody::default()
     } else {
         serde_json::from_slice::<DeactivateBody>(&body)
             .map_err(|_| AppError::BadRequest("請求內容格式不正確".into()))?
-            .reassign_to
+    };
+    if parsed.auto_reassign && parsed.reassign_to.is_some() {
+        return Err(AppError::BadRequest(
+            "指定改派對象與自動分配只能擇一".into(),
+        ));
+    }
+    let reassign = match (parsed.reassign_to, parsed.auto_reassign) {
+        (Some(id), _) => Some(ReassignTarget::One(id)),
+        (None, true) => Some(ReassignTarget::Auto),
+        (None, false) => None,
     };
     let mut tx = ctx.begin(&state).await?;
     let row: Option<(Role, bool)> =
@@ -446,12 +459,12 @@ async fn deactivate_member(
     .await?;
     let mut reassigned = 0;
     if upcoming > 0 {
-        let Some(new_staff) = reassign_to else {
+        let Some(target) = reassign else {
             return Err(AppError::Conflict(format!(
                 "此成員還有 {upcoming} 筆未來已確認的預約,請先取消(顧客會收到通知)、請顧客改期,或改派給其他員工"
             )));
         };
-        reassigned = reassign_upcoming(&mut tx, &ctx, user_id, new_staff).await?;
+        reassigned = reassign_upcoming(&mut tx, &ctx, user_id, target).await?;
     }
     sqlx::query("UPDATE memberships SET active = false WHERE user_id = $1")
         .bind(user_id)
@@ -471,26 +484,40 @@ async fn deactivate_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// 把 `from` 未來已確認的預約全部改派給 `to`,回傳筆數。呼叫端已鎖住 `from` 的成員列。
+#[derive(Clone, Copy)]
+enum ReassignTarget {
+    /// 全部給這一位
+    One(Uuid),
+    /// 逐筆挑「那個時段有空、提供該服務」的其他在職成員
+    Auto,
+}
+
+/// 把 `from` 未來已確認的預約全部改派出去,回傳筆數。呼叫端已鎖住 `from` 的成員列。
 async fn reassign_upcoming(
     tx: &mut crate::db::Tx,
     ctx: &TenantCtx,
     from: Uuid,
-    to: Uuid,
+    target: ReassignTarget,
 ) -> Result<usize, AppError> {
-    if to == from {
-        return Err(AppError::BadRequest("不能改派給要停用的人自己".into()));
-    }
-    // 對象必須是這家店仍在職的成員(RLS 已限定在這家店)
-    let target_name: Option<String> = sqlx::query_scalar(
-        "SELECT u.name FROM memberships m JOIN users u ON u.id = m.user_id
-         WHERE m.user_id = $1 AND m.active",
-    )
-    .bind(to)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let target_name =
-        target_name.ok_or_else(|| AppError::BadRequest("改派的對象不是這家店的在職成員".into()))?;
+    // 指定對象時先驗證:必須是這家店仍在職的成員(RLS 已限定在這家店)
+    let fixed = match target {
+        ReassignTarget::One(to) => {
+            if to == from {
+                return Err(AppError::BadRequest("不能改派給要停用的人自己".into()));
+            }
+            let name: Option<String> = sqlx::query_scalar(
+                "SELECT u.name FROM memberships m JOIN users u ON u.id = m.user_id
+                 WHERE m.user_id = $1 AND m.active",
+            )
+            .bind(to)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let name =
+                name.ok_or_else(|| AppError::BadRequest("改派的對象不是這家店的在職成員".into()))?;
+            Some((to, name))
+        }
+        ReassignTarget::Auto => None,
+    };
 
     let tz = booking::tenant_timezone(tx, ctx.tenant_id).await?;
     let rows: Vec<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
@@ -513,6 +540,20 @@ async fn reassign_upcoming(
             Err(e) => return Err(e),
         };
         let old = booking::mail_ctx(tx, *id).await?;
+        let (to, target_name) = match &fixed {
+            Some((to, name)) => (*to, name.clone()),
+            None => {
+                // 自動分配:這個時段有空、提供該服務的其他成員,取排在最前面的那位
+                let free = booking::free_staff_for(tx, tz, &service, *starts_at, *id).await?;
+                let pick = free.into_iter().find(|s| *s != from).ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "{} 的預約找不到有空的其他成員,無法自動分配,請手動指定或先取消",
+                        old.when
+                    ))
+                })?;
+                (pick, String::from("自動挑選的成員"))
+            }
+        };
         booking::reassign_booking(tx, tz, *id, &service, to, *starts_at)
             .await
             .map_err(|e| match e {
@@ -576,6 +617,100 @@ async fn reactivate_member(
         "member",
         Some(user_id),
         json!({ "role": target }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferOwnership {
+    user_id: Uuid,
+    /// 要重新輸入自己的密碼:被盜用的登入狀態不能直接把店送人
+    password: String,
+}
+
+/// 移交店主身分(僅店主):對方變成擁有者,自己降為管理者。對方必須是這家店在職的成員。
+/// 要重新輸入密碼(錯誤回 400 而不是 401:前端對 401 一律當成登入過期)。店家永遠只有一位擁有者。
+async fn transfer_ownership(
+    State(state): State<AppState>,
+    ctx: TenantCtx,
+    Path(slug): Path<String>,
+    Json(req): Json<TransferOwnership>,
+) -> Result<StatusCode, AppError> {
+    ctx.require_owner()?;
+    if req.user_id == ctx.user_id {
+        return Err(AppError::BadRequest("不能移交給自己".into()));
+    }
+    // 失敗計入帳號鎖定(和登入共用),否則持有被盜登入狀態的人可以無限次猜密碼
+    super::auth::confirm_password(&state, ctx.user_id, req.password).await?;
+
+    let mut tx = ctx.begin(&state).await?;
+    let rows: Vec<(Uuid, Role, bool)> = sqlx::query_as(
+        "SELECT user_id, role, active FROM memberships WHERE user_id = ANY($1) ORDER BY user_id FOR UPDATE",
+    )
+    .bind(vec![ctx.user_id, req.user_id])
+    .fetch_all(&mut *tx)
+    .await?;
+    let target = rows
+        .iter()
+        .find(|(id, _, _)| *id == req.user_id)
+        .ok_or(AppError::NotFound)?;
+    if !target.2 {
+        return Err(AppError::Conflict("對方已停用,請先重新啟用".into()));
+    }
+    if target.1 == Role::Owner {
+        return Err(AppError::Conflict("對方已經是擁有者".into()));
+    }
+    // 自己必須(仍)是擁有者:鎖定之後再確認一次,避免兩個移交同時進行
+    if !rows
+        .iter()
+        .any(|(id, role, _)| *id == ctx.user_id && *role == Role::Owner)
+    {
+        return Err(AppError::Forbidden);
+    }
+    sqlx::query("UPDATE memberships SET role = 'owner' WHERE user_id = $1")
+        .bind(req.user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE memberships SET role = 'manager' WHERE user_id = $1")
+        .bind(ctx.user_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut tx,
+        ctx.tenant_id,
+        Actor::User(ctx.user_id),
+        "ownership.transferred",
+        "member",
+        Some(req.user_id),
+        json!({ "from": ctx.user_id, "to": req.user_id }),
+    )
+    .await?;
+    // 通知新店主(寄給資料庫裡的 Email)
+    let (to, shop, old_name): (String, String, String) = sqlx::query_as(
+        "SELECT (SELECT email::text FROM users WHERE id = $1), t.name,
+                (SELECT name FROM users WHERE id = $2)
+         FROM tenants t WHERE t.id = $3",
+    )
+    .bind(req.user_id)
+    .bind(ctx.user_id)
+    .bind(ctx.tenant_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    outbox::enqueue(
+        &mut tx,
+        ctx.tenant_id,
+        &mail::ownership_transferred(
+            &to,
+            &shop,
+            &old_name,
+            &mail::settings_link(&state.public_base_url, &slug),
+        ),
+        Some(&format!(
+            "ownership_transferred:{}:{}:{}",
+            ctx.tenant_id, ctx.user_id, req.user_id
+        )),
     )
     .await?;
     tx.commit().await?;

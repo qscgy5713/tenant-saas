@@ -1999,3 +1999,119 @@ async fn deactivating_works_with_a_json_content_type_and_an_empty_body(pool: PgP
     assert_eq!(post("{oops").await, StatusCode::BAD_REQUEST);
     assert_eq!(post("").await, StatusCode::NO_CONTENT);
 }
+
+// ---------- 停用時自動分配 ----------
+
+async fn add_third_staff(pool: &PgPool, s: &Shop) -> Uuid {
+    signup(&s.app, "c@example.com").await;
+    add_member(pool, "shop-a", "c@example.com", "staff").await;
+    let id = user_id(pool, "c@example.com").await;
+    open_every_day(&s.app, &s.owner, id, &s.service_id).await;
+    id
+}
+
+async fn deactivate_auto(s: &Shop, user: Uuid) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{user}/deactivate"),
+        Some(json!({ "auto_reassign": true })),
+        Some(&s.owner),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn auto_reassign_picks_someone_free_for_each_booking(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let c_id = add_third_staff(&pool, &s).await;
+    let t1 = at(day(3), 10, 0);
+    let t2 = at(day(4), 14, 0);
+    let (_, one) = book(&s.app, &s, Some(b_id), t1, "x@example.com").await;
+    let (_, two) = book(&s.app, &s, Some(b_id), t2, "y@example.com").await;
+    // 第一筆的時段:店主與 c 都有空;第二筆:店主已經有預約,只剩 c
+    book(&s.app, &s, Some(s.owner_id), t2, "z@example.com").await;
+
+    let (status, body) = deactivate_auto(&s, b_id).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (one, two) = (one["id"].as_str().unwrap(), two["id"].as_str().unwrap());
+    let (s1, s2) = (staff_of(&pool, one).await, staff_of(&pool, two).await);
+    assert_ne!(s1, b_id);
+    assert!([s.owner_id, c_id].contains(&s1), "{s1}");
+    assert_eq!(s2, c_id, "第二筆時段店主已有預約,只能給 c");
+    // 時間沒動、顧客收到通知
+    let starts: DateTime<Utc> =
+        sqlx::query_scalar("SELECT starts_at FROM bookings WHERE id = $1::uuid")
+            .bind(two)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(starts, t2);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM email_outbox WHERE dedupe_key LIKE 'staff_changed:%'"
+        )
+        .await,
+        2
+    );
+}
+
+#[sqlx::test]
+async fn auto_reassign_fails_cleanly_when_nobody_is_free(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let t = at(day(3), 10, 0);
+    let (_, created) = book(&s.app, &s, Some(b_id), t, "x@example.com").await;
+    // 唯一的另一位(店主)那個時段已經有預約
+    book(&s.app, &s, Some(s.owner_id), t, "z@example.com").await;
+
+    let (status, body) = deactivate_auto(&s, b_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("找不到有空"),
+        "{body}"
+    );
+    assert_eq!(staff_of(&pool, created["id"].as_str().unwrap()).await, b_id);
+    let active: bool = sqlx::query_scalar("SELECT active FROM memberships WHERE user_id = $1")
+        .bind(b_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(active);
+}
+
+#[sqlx::test]
+async fn auto_reassign_and_a_named_target_are_mutually_exclusive(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let (status, _) = call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{b_id}/deactivate"),
+        Some(json!({ "auto_reassign": true, "reassign_to": s.owner_id })),
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn auto_reassign_never_picks_someone_who_was_already_deactivated(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (_, b_id) = add_second_staff(&pool, &s).await;
+    let c_id = add_third_staff(&pool, &s).await; // 仍提供該服務、有營業時間,但已離職
+    assert_eq!(deactivate(&s, c_id).await.0, StatusCode::NO_CONTENT);
+    let t = at(day(3), 10, 0);
+    let (_, created) = book(&s.app, &s, Some(b_id), t, "x@example.com").await;
+    book(&s.app, &s, Some(s.owner_id), t, "z@example.com").await; // 在職的另一位(店主)沒空
+
+    let (status, body) = deactivate_auto(&s, b_id).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "只剩已離職的人有空,不能算: {body}"
+    );
+    assert_eq!(staff_of(&pool, created["id"].as_str().unwrap()).await, b_id);
+}

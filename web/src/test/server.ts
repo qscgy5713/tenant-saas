@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
-import type { PublicBooking, Service, Slot, Staff } from '../api/types'
+import type { PublicBooking, Service, Shop, Slot, Staff } from '../api/types'
 import { addDays, todayYmd } from '../lib/time'
 
 export const API = 'http://api.test'
@@ -48,6 +48,8 @@ export function standardSlots(from: string, to: string, staffIds: string[] = [ST
 export const today = () => todayYmd(TZ, NOW)
 
 export interface ShopMocks {
+  /** 店家本身的資料;沒給就只有名稱與時區(簡介 / 地址 / 電話都是 null) */
+  shop?: Partial<Shop>
   services?: Service[]
   staff?: Staff[]
   /** 自訂時段;預設為 standardSlots */
@@ -61,7 +63,14 @@ export function mockShop(m: ShopMocks = {}) {
   const staff = m.staff ?? [STAFF_A]
   server.use(
     http.get(`${API}/public/shops/demo-salon`, () =>
-      HttpResponse.json({ name: '森林系髮廊', timezone: TZ }),
+      HttpResponse.json({
+        name: '森林系髮廊',
+        timezone: TZ,
+        description: null,
+        address: null,
+        phone: null,
+        ...m.shop,
+      }),
     ),
     http.get(`${API}/public/shops/demo-salon/services`, () => HttpResponse.json(services)),
     http.get(`${API}/public/shops/demo-salon/services/:id/staff`, () => HttpResponse.json(staff)),

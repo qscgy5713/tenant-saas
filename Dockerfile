@@ -19,7 +19,9 @@ RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 # ---- 執行 ----
 FROM debian:bookworm-slim
+# 先升級基底映像裡已有的套件:映像標籤是移動的,但建置快取可能讓基底落後,CI 的漏洞掃描(Trivy)會抓到
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app

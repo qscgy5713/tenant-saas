@@ -127,6 +127,33 @@ describe('describeDetail', () => {
     expect(actionLabel('tenant.deletion_cancelled')).toBe('取消刪除店家')
   })
 
+  it('移交店主、店家資訊、系統取消刪除', () => {
+    expect(actionLabel('ownership.transferred')).toBe('移交店主身分')
+    expect(actionLabel('member.account_deleted')).toBe('刪除帳號')
+    expect(
+      describeDetail(
+        entry({ action: 'tenant.profile_updated', detail: { changed: ['address', 'phone'] } }),
+        tz,
+      ),
+    ).toBe('修改了地址、電話')
+    expect(
+      describeDetail(entry({ action: 'tenant.profile_updated', detail: { changed: [] } }), tz),
+    ).toBe('沒有實際變更')
+    expect(
+      describeDetail(
+        entry({
+          action: 'tenant.deletion_cancelled',
+          detail: { reason: 'live_bookings', count: 1 },
+        }),
+        tz,
+      ),
+    ).toBe('到期時仍有未來預約,系統自動取消刪除')
+    // 店主自己取消的沒有 reason
+    expect(
+      describeDetail(entry({ action: 'tenant.deletion_cancelled', detail: {} }), tz),
+    ).toBeNull()
+  })
+
   it('停用 / 重新啟用成員', () => {
     expect(actionLabel('member.deactivated')).toBe('停用成員')
     expect(actionLabel('booking.reassigned')).toBe('改派預約')

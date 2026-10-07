@@ -4,7 +4,13 @@ import { Link } from 'react-router-dom'
 import { ApiError } from '../../api/client'
 import { Notice } from '../../components/States'
 import { validateName } from '../../lib/validate'
-import { cancelShopDeletion, requestShopDeletion, setDataRetention, updateShop } from '../api'
+import {
+  cancelShopDeletion,
+  requestShopDeletion,
+  setDataRetention,
+  setShopProfile,
+  updateShop,
+} from '../api'
 import { TextField } from '../components/AuthCard'
 import { ConfirmDialog } from '../components/Modal'
 import { formatDateTime } from '../../lib/time'
@@ -123,6 +129,7 @@ export function SettingsPage() {
           </button>
         </div>
       </form>
+      <ProfileSection />
       <RetentionSection />
       <DeletionSection />
     </div>
@@ -131,6 +138,97 @@ export function SettingsPage() {
 
 const errorText = (e: unknown) =>
   e instanceof ApiError ? e.message : e ? '操作失敗,請再試一次。' : null
+
+/** 顧客預約頁上顯示的店家資訊(都是選填)。電話只能是數字與 + - ( ) # 空白:預約頁會把它做成撥號連結 */
+function ProfileSection() {
+  const { slug, shop } = useShop()
+  const queryClient = useQueryClient()
+  const [values, setValues] = useState({
+    description: shop.description ?? '',
+    address: shop.address ?? '',
+    phone: shop.phone ?? '',
+  })
+  const [saved, setSaved] = useState(false)
+  const errors = {
+    description: values.description.length > 500 ? '最多 500 字' : undefined,
+    address: values.address.length > 200 ? '最多 200 字' : undefined,
+    phone: !/^[0-9+\-()# ]*$/.test(values.phone)
+      ? '只能包含數字與 + - ( ) # 空白'
+      : values.phone.length > 30
+        ? '最多 30 字'
+        : undefined,
+  }
+  const valid = !errors.description && !errors.address && !errors.phone
+  const changed =
+    values.description.trim() !== (shop.description ?? '') ||
+    values.address.trim() !== (shop.address ?? '') ||
+    values.phone.trim() !== (shop.phone ?? '')
+  const mutation = useMutation({
+    mutationFn: () => setShopProfile(slug, values),
+    onSuccess: () => {
+      setSaved(true)
+      queryClient.invalidateQueries({ queryKey: ['admin', 'shop', slug] })
+      queryClient.invalidateQueries({ queryKey: ['shop', slug] })
+    },
+  })
+  const set =
+    (key: keyof typeof values) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setValues((v) => ({ ...v, [key]: e.target.value }))
+      setSaved(false)
+    }
+  return (
+    <form
+      className="form card-section"
+      onSubmit={(e) => {
+        e.preventDefault()
+        setSaved(false)
+        if (valid && changed) mutation.mutate()
+      }}
+      noValidate
+    >
+      <h2>店家資訊</h2>
+      <p className="muted small">顯示在顧客的預約頁上,全部選填。清空就是不顯示。</p>
+      {saved && <Notice tone="success">已儲存。</Notice>}
+      {mutation.error && <Notice tone="error">{errorText(mutation.error)}</Notice>}
+      <TextField label="店家簡介" error={errors.description} hint="最多 500 字,可以換行">
+        <textarea
+          name="description"
+          rows={4}
+          value={values.description}
+          onChange={set('description')}
+          aria-invalid={!!errors.description}
+        />
+      </TextField>
+      <TextField label="地址" error={errors.address}>
+        <input
+          name="address"
+          value={values.address}
+          onChange={set('address')}
+          aria-invalid={!!errors.address}
+        />
+      </TextField>
+      <TextField label="電話" error={errors.phone}>
+        <input
+          name="phone"
+          inputMode="tel"
+          value={values.phone}
+          onChange={set('phone')}
+          aria-invalid={!!errors.phone}
+        />
+      </TextField>
+      <div className="actions">
+        <button
+          type="submit"
+          className="btn btn-primary"
+          disabled={!valid || !changed || mutation.isPending}
+        >
+          {mutation.isPending ? '儲存中…' : '儲存'}
+        </button>
+      </div>
+    </form>
+  )
+}
 
 /** 顧客個資到期自動匿名化:姓名 / Email / 電話被抹除,預約紀錄與統計保留 */
 function RetentionSection() {

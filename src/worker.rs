@@ -157,12 +157,17 @@ async fn enqueue_reminders(pool: &PgPool, public_base_url: &str) -> Result<u64, 
         )
         .await?;
         sqlx::query(
-            "UPDATE bookings SET reminder_queued_at = now(), reminder_token_hash = $2 WHERE id = $1",
+            // 保留最近 10 個提醒連結:舊的提醒信也要能用(確認信的連結本來就一直有效)
+            "UPDATE bookings SET reminder_queued_at = now(),
+                    reminder_token_hashes = CASE WHEN cardinality(reminder_token_hashes) >= 10
+                        THEN reminder_token_hashes[2:cardinality(reminder_token_hashes)] || $2::text
+                        ELSE reminder_token_hashes || $2::text END
+             WHERE id = $1",
         )
         .bind(row.id)
         .bind(token::hash(&raw))
-            .execute(&mut *tx)
-            .await?;
+        .execute(&mut *tx)
+        .await?;
         queued += 1;
     }
     tx.commit().await?;
@@ -274,6 +279,8 @@ async fn cleanup(pool: &PgPool) -> Result<u64, AppError> {
 const RETENTION_BATCH: i32 = 200;
 /// 保留政策的清理多久跑一次(不需要每個 tick 都跑)
 const RETENTION_EVERY: Duration = Duration::from_secs(3600);
+/// 註冊後超過這麼多天仍沒驗證 Email(而且沒加入任何店家)的帳號會被刪除
+pub const UNVERIFIED_ACCOUNT_DAYS: i32 = 30;
 /// 刪除店家的寬限期(天)
 pub const TENANT_DELETION_GRACE_DAYS: i32 = 30;
 
@@ -282,6 +289,8 @@ pub struct RetentionStats {
     pub customers_anonymized: u64,
     pub audit_rows_purged: u64,
     pub tenants_deleted: u64,
+    pub unverified_deleted: u64,
+    pub account_events_purged: u64,
 }
 
 /// 資料保留政策:匿名化過期的顧客、清除過期的稽核日誌、刪除寬限期已滿的店家。
@@ -303,6 +312,8 @@ pub async fn retention_sweep(pool: &PgPool, audit_days: Option<u32>) -> Retentio
             None => 0,
         },
         tenants_deleted: or_log("delete_tenants", delete_due_tenants(pool).await),
+        unverified_deleted: or_log("delete_unverified", delete_stale_unverified(pool).await),
+        account_events_purged: or_log("purge_account_events", purge_account_events(pool).await),
     }
 }
 
@@ -369,6 +380,36 @@ async fn purge_audit(pool: &PgPool, days: u32) -> Result<u64, AppError> {
     if n > 0 {
         metrics::counter!("audit_rows_purged_total").increment(n as u64);
         tracing::info!(rows = n, "依保留政策清除過期的稽核日誌");
+    }
+    Ok(n as u64)
+}
+
+/// 帳號安全事件只保留這麼多天
+pub const ACCOUNT_EVENT_DAYS: i32 = 180;
+
+async fn purge_account_events(pool: &PgPool) -> Result<u64, AppError> {
+    let mut tx = begin_worker(pool).await?;
+    let n: i32 = sqlx::query_scalar("SELECT retention_purge_account_events($1, $2)")
+        .bind(ACCOUNT_EVENT_DAYS)
+        .bind(RETENTION_BATCH * 25)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(n as u64)
+}
+
+/// 超過期限仍沒驗證 Email、也沒加入任何店家的帳號:刪除(釋出被占住的 Email)
+async fn delete_stale_unverified(pool: &PgPool) -> Result<u64, AppError> {
+    let mut tx = begin_worker(pool).await?;
+    let n: i32 = sqlx::query_scalar("SELECT retention_delete_stale_unverified($1, $2)")
+        .bind(UNVERIFIED_ACCOUNT_DAYS)
+        .bind(RETENTION_BATCH)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if n > 0 {
+        metrics::counter!("unverified_accounts_deleted_total").increment(n as u64);
+        tracing::info!(count = n, "刪除超過期限仍未驗證的帳號");
     }
     Ok(n as u64)
 }
