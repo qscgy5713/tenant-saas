@@ -641,6 +641,53 @@ async fn a_shop_that_still_has_upcoming_bookings_at_the_deadline_is_not_deleted(
 }
 
 #[sqlx::test]
+async fn a_shop_whose_owner_is_gone_is_not_left_ownerless_by_the_safety_net(pool: PgPool) {
+    // 店主申請刪除後刪了自己的帳號(成員資格停用)。到期時還有未來預約:
+    // 不能「取消刪除」(那會留下一家沒有擁有者的店),要延後到預約結束再刪
+    let s = shop(&pool, "shop-a", "a@example.com").await;
+    let (status, booking) = book(&s, "shop-a", at(day(3), 10), "c@example.com").await;
+    assert_eq!(status, StatusCode::CREATED, "{booking}");
+    sqlx::query(
+        "UPDATE tenants SET deletion_requested_at = now() - interval '31 days',
+                            deletion_scheduled_at = now() - interval '1 minute'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE memberships SET active = false WHERE role = 'owner'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(retention_sweep(&pool, Some(730)).await.tenants_deleted, 0);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM tenants WHERE deletion_scheduled_at IS NOT NULL"
+        )
+        .await,
+        1,
+        "仍在排程刪除,沒有被取消"
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM audit_logs WHERE action = 'tenant.deletion_cancelled'"
+        )
+        .await,
+        0
+    );
+
+    // 預約結束(這裡用取消代替)後,下一輪照原本的決定刪除
+    sqlx::query("UPDATE bookings SET status = 'cancelled'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retention_sweep(&pool, Some(730)).await.tenants_deleted, 1);
+    assert_eq!(count(&pool, "SELECT count(*) FROM tenants").await, 0);
+}
+
+#[sqlx::test]
 async fn the_deletion_mail_dedupe_key_does_not_contain_an_email_address(pool: PgPool) {
     // 信件寄出後內文會清空,但 dedupe_key 會一直留著:不能放個資
     let s = shop(&pool, "shop-a", "a@example.com").await;

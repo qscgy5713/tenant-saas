@@ -57,6 +57,8 @@ export interface Member {
   role: Role
   /** false = 已停用(離職):進不了這家店、不能被預約,歷史紀錄保留 */
   active: boolean
+  /** 本人刪除了帳號:永遠停用、不能重新啟用;email 是匿名代號,不要顯示 */
+  deleted: boolean
 }
 
 export interface AdminService {

@@ -19,9 +19,9 @@ export function canTransferOwnership(me: { id: string; role: Role }, target: Mem
   return me.role === 'owner' && target.active && target.role !== 'owner' && target.user_id !== me.id
 }
 
-/** 重新啟用:只有管理者以上(停用中的人自己已經進不了這家店) */
+/** 重新啟用:只有管理者以上(停用中的人自己已經進不了這家店);已刪除帳號的人不能 */
 export function canReactivate(me: { id: string; role: Role }, target: Member): boolean {
-  return !target.active && target.user_id !== me.id && canRemove(me, target)
+  return !target.active && !target.deleted && target.user_id !== me.id && canRemove(me, target)
 }
 
 /** 可以改某位成員的營業時間 / 休假:管理者以上,或本人 */

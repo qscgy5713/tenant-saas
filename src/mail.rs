@@ -249,9 +249,9 @@ fn reason_block(reason: Option<&str>) -> String {
     }
 }
 
-/// 誰取消的(員工通知信的措辭不同)
+/// 誰取消 / 改期的(員工通知信的措辭不同)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CancelledBy {
+pub enum ChangedBy {
     Customer,
     Manager,
 }
@@ -261,12 +261,12 @@ pub fn cancelled_for_staff(
     m: &BookingMail,
     to: &str,
     customer_name: &str,
-    by: CancelledBy,
+    by: ChangedBy,
     reason: Option<&str>,
 ) -> Email {
     let who = match by {
-        CancelledBy::Customer => "顧客自己取消了",
-        CancelledBy::Manager => "店家管理者取消了",
+        ChangedBy::Customer => "顧客自己取消了",
+        ChangedBy::Manager => "店家管理者取消了",
     };
     Email {
         to: to.to_string(),
@@ -278,6 +278,30 @@ pub fn cancelled_for_staff(
             m.service,
             m.when,
             reason_block(reason)
+        ),
+    }
+}
+
+/// 由您負責的預約時間變了,通知負責的員工(`to` 是員工的 Email)。
+/// 顧客用自己的連結改期、或管理者替別人負責的預約改期時寄;員工自己改的不寄
+pub fn rescheduled_for_staff(
+    m: &BookingMail,
+    to: &str,
+    customer_name: &str,
+    by: ChangedBy,
+    old_when: &str,
+) -> Email {
+    let who = match by {
+        ChangedBy::Customer => "顧客自己更改了",
+        ChangedBy::Manager => "店家管理者更改了",
+    };
+    Email {
+        to: to.to_string(),
+        subject: format!("預約時間已變更:{}", m.shop),
+        body: format!(
+            "您好,\n\n{who}一筆由您負責的預約的時間:\n\n  店家:{}\n  顧客:{customer_name}\n  服務:{}\n  原時間:{old_when}\n  新時間:{}\n\n\
+             原時段已釋出,請改在新時間準備。\n",
+            m.shop, m.service, m.when
         ),
     }
 }

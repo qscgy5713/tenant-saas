@@ -52,6 +52,7 @@ const member = (over: Partial<Member>): Member => ({
   email: 'm@example.com',
   role: 'staff',
   active: true,
+  deleted: false,
   ...over,
 })
 
@@ -97,6 +98,7 @@ describe('權限:canRemove 與後端 Role::can_manage 一致', () => {
     expect(canReactivate(me('staff'), gone())).toBe(false)
     expect(canReactivate(me('owner'), member({ role: 'staff' }))).toBe(false) // 本來就啟用
     expect(canReactivate(me('owner'), gone({ user_id: 'me' }))).toBe(false)
+    expect(canReactivate(me('owner'), gone({ deleted: true }))).toBe(false) // 本人已刪除帳號
   })
   it('canEditSchedule:管理者以上,或本人', () => {
     expect(canEditSchedule(me('owner'), 'x')).toBe(true)
@@ -1306,6 +1308,27 @@ describe('團隊', () => {
       await user.click(within(row()).getByRole('button', { name: '重新啟用' }))
       await waitFor(() => expect(within(row()).queryByText('已停用')).not.toBeInTheDocument())
       expect(s.calls).toHaveLength(2)
+    })
+
+    it('本人已刪除帳號的成員:標示「帳號已刪除」,不顯示匿名 Email,也沒有「重新啟用」', async () => {
+      mockShopMe('owner')
+      serve(() => [
+        ...roster(),
+        member({
+          user_id: 'u-deleted',
+          name: '已刪除的使用者',
+          email: 'deleted-u-deleted@anonymized.invalid',
+          role: 'staff',
+          active: false,
+          deleted: true,
+        }),
+      ])
+      renderApp('/admin/demo-salon/team')
+      const row = (await screen.findByText('已刪除的使用者')).closest('li')!
+      expect(within(row).getByText('帳號已刪除')).toBeInTheDocument()
+      expect(within(row).queryByText('已停用')).not.toBeInTheDocument()
+      expect(screen.queryByText(/anonymized\.invalid/)).not.toBeInTheDocument()
+      expect(within(row).queryByRole('button', { name: '重新啟用' })).not.toBeInTheDocument()
     })
 
     it('manager:員工有「停用」與「移除」,同階的管理者兩個都沒有;staff 只能「退出團隊」自己', async () => {

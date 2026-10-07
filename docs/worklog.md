@@ -2,6 +2,13 @@
 
 每次工作結束記錄:做了什麼、遇到什麼問題、下一步。最新的放最上面。
 
+## 2026-10-07(全面 CR)
+- 逐檔重讀後端(認證、租戶、成員、預約、公開端點、worker、維運指令、migration)與相關前端,找到 5 個問題並修好,細節見 decisions「全面 CR 的發現與修正」
+- 最重要的一個:**不需登入就能用 NUL 字元觸發 500**(進而觸發 5xx 告警),先寫測試重現,再在錯誤轉換處統一修
+- migration 0035(沒有在職擁有者時,刪除店家的安全網改成延後而不是取消);成員列表加 `deleted`;新增員工的「預約時間已變更」通知信
+- 測試:新增 `tests/input_hygiene.rs` 與 retention / account_deletion / members / booking 各 1 個、前端 1 個;每項修正都做了突變驗證
+- 教訓:**去重鍵不能只由「操作的對象」組成**,來回操作會撞鍵;只排一次的通知不需要去重
+
 ## 2026-10-07(代為決定:維運指令、稽核歸檔、註冊告警)
 - 使用者說「你幫我決定」。決定與理由全部寫在 decisions「由我代為做的產品 / 維運決定」
 - 做了:`tenant-saas admin`(plans / shops / show / set-plan / suspend / unsuspend / export-audit)、`registrations_total` + `RegistrationSpike`、compose 的 `ops` profile、前端 `operator.*` 稽核標籤

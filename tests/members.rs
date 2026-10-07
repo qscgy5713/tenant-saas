@@ -906,3 +906,28 @@ async fn wrong_passwords_when_transferring_count_towards_the_account_lockout(poo
             .unwrap();
     assert_eq!(failed, 0);
 }
+
+#[sqlx::test]
+async fn transferring_back_and_forth_notifies_the_new_owner_every_time(pool: PgPool) {
+    // 去重鍵若固定為「店家 + 舊店主 + 新店主」,A → B → A → B 的第二次通知會被吞掉
+    let app = app(pool.clone());
+    let a_token = signup(&app, "a@example.com").await;
+    let m_token = signup(&app, "m@example.com").await;
+    create_tenant(&app, &a_token, "shop-a").await;
+    add_member(&pool, "shop-a", "m@example.com", "manager").await;
+    let a = user_id(&pool, "a@example.com").await;
+    let m = user_id(&pool, "m@example.com").await;
+
+    for (token, to) in [(&a_token, m), (&m_token, a), (&a_token, m)] {
+        let (status, body) = transfer(&app, token, to, "password123").await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+    let to_m: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM email_outbox
+         WHERE dedupe_key LIKE 'ownership_transferred:%' AND to_email = 'm@example.com'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(to_m, 2);
+}

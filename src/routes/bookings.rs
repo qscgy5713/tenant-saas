@@ -333,7 +333,7 @@ async fn update(
                 &m.view(),
                 &m.staff_email,
                 &m.customer_name,
-                mail::CancelledBy::Manager,
+                mail::ChangedBy::Manager,
                 cancel_reason.as_deref(),
             );
             outbox::enqueue(
@@ -472,9 +472,33 @@ async fn reschedule(
         &mut tx,
         ctx.tenant_id,
         &email,
-        Some(&format!("rescheduled:{id}:{}", req.start.timestamp())),
+        // 結尾隨機:不用新時間當鍵 —— 10:00 → 11:00 → 再改回 10:00 時,第三封會被去重吞掉
+        Some(&format!(
+            "rescheduled:{id}:customer:{}",
+            Uuid::new_v4().simple()
+        )),
     )
     .await?;
+    // 管理者替別人負責的預約改期:也通知那位員工(和取消時一樣;自己改自己的不寄)
+    if target.staff_user_id != ctx.user_id {
+        let email = mail::rescheduled_for_staff(
+            &mail_ctx.view(),
+            &mail_ctx.staff_email,
+            &mail_ctx.customer_name,
+            mail::ChangedBy::Manager,
+            &mail::format_local(old_start, tz),
+        );
+        outbox::enqueue(
+            &mut tx,
+            ctx.tenant_id,
+            &email,
+            Some(&format!(
+                "rescheduled:{id}:staff:{}",
+                Uuid::new_v4().simple()
+            )),
+        )
+        .await?;
+    }
 
     let ends_at = req.start + service.duration();
     tx.commit().await?;

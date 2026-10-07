@@ -207,6 +207,8 @@ struct MemberResponse {
     role: Role,
     /// false = 已停用(離職):不能再存取這間店、不能被預約,歷史紀錄保留
     active: bool,
+    /// 本人刪除了帳號(匿名化,見 migration 0030):永遠是停用,不能重新啟用;Email 是匿名代號,前端不顯示
+    deleted: bool,
 }
 
 async fn list_members(
@@ -216,7 +218,8 @@ async fn list_members(
     let mut tx = ctx.begin(&state).await?;
     // 不手動加 WHERE tenant_id:租戶範圍完全由 RLS 決定
     let rows = sqlx::query_as::<_, MemberResponse>(
-        "SELECT u.id AS user_id, u.name, u.email::text AS email, m.role, m.active
+        "SELECT u.id AS user_id, u.name, u.email::text AS email, m.role, m.active,
+                u.email::text LIKE '%@anonymized.invalid' AS deleted
          FROM memberships m JOIN users u ON u.id = m.user_id
          ORDER BY m.active DESC, u.name",
     )

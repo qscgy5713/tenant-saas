@@ -577,7 +577,12 @@ async fn reassign_upcoming(
             tx,
             ctx.tenant_id,
             &mail::staff_changed(&now.view(), &old.staff),
-            Some(&format!("staff_changed:{id}:{to}")),
+            // 結尾加隨機值:同一筆預約可能在 30 天內(outbox 保留期)被改派回同一位員工(A → B → A → B),
+            // 固定的鍵會讓第二次的通知被去重吞掉。每次改派本來就只排一封,不需要去重
+            Some(&format!(
+                "staff_changed:{id}:{to}:{}",
+                Uuid::new_v4().simple()
+            )),
         )
         .await?;
     }
@@ -603,6 +608,19 @@ async fn reactivate_member(
     }
     if active {
         return Err(AppError::Conflict("此成員已經是啟用狀態".into()));
+    }
+    // 已刪除帳號(匿名化,見 migration 0030)的成員資格也是「停用」,但那個人已經不存在、也登入不了:
+    // 重新啟用會讓顧客能預約到一位永遠不會出現的人,還白占一個名額
+    let deleted: bool = sqlx::query_scalar(
+        "SELECT email::text LIKE '%@anonymized.invalid' FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if deleted {
+        return Err(AppError::Conflict(
+            "這位成員已經刪除了自己的帳號,無法重新啟用".into(),
+        ));
     }
     plan::ensure_staff_slot(&mut tx, ctx.tenant_id).await?;
     sqlx::query("UPDATE memberships SET active = true WHERE user_id = $1")
@@ -707,9 +725,13 @@ async fn transfer_ownership(
             &old_name,
             &mail::settings_link(&state.public_base_url, &slug),
         ),
+        // 結尾加隨機值:A → B → A → B 這樣來回移交時,固定的鍵會讓之後的通知被去重吞掉(見 staff_changed)
         Some(&format!(
-            "ownership_transferred:{}:{}:{}",
-            ctx.tenant_id, ctx.user_id, req.user_id
+            "ownership_transferred:{}:{}:{}:{}",
+            ctx.tenant_id,
+            ctx.user_id,
+            req.user_id,
+            Uuid::new_v4().simple()
         )),
     )
     .await?;

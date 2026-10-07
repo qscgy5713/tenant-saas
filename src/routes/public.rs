@@ -692,7 +692,7 @@ async fn cancel_booking(
             &m.view(),
             &m.staff_email,
             &m.customer_name,
-            mail::CancelledBy::Customer,
+            mail::ChangedBy::Customer,
             None,
         );
         outbox::enqueue(
@@ -733,6 +733,26 @@ async fn reschedule_booking(
         "booking",
         Some(id),
         json!({ "from_starts_at": old_start, "to_starts_at": req.start }),
+    )
+    .await?;
+    // 通知負責的員工:他的行程變了(和顧客取消時一樣)
+    let m = booking::mail_ctx(&mut tx, id).await?;
+    let email = mail::rescheduled_for_staff(
+        &m.view(),
+        &m.staff_email,
+        &m.customer_name,
+        mail::ChangedBy::Customer,
+        &mail::format_local(old_start, tz),
+    );
+    outbox::enqueue(
+        &mut tx,
+        tenant_id,
+        &email,
+        // 結尾隨機:A → B → A → B 來回改期時,每次都要通知
+        Some(&format!(
+            "rescheduled:{id}:staff:{}",
+            Uuid::new_v4().simple()
+        )),
     )
     .await?;
     let view = load_by_token(&mut tx, &raw).await?;

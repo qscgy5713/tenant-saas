@@ -237,6 +237,60 @@ async fn deleting_your_account_erases_who_you_are_and_frees_the_email(pool: PgPo
 }
 
 #[sqlx::test]
+async fn a_deleted_account_cannot_be_reactivated_in_the_shop(pool: PgPool) {
+    // 刪除帳號只是把成員資格停用;店家不能把這個「已刪除的使用者」重新啟用成可被預約的員工
+    let s = shop(&pool).await;
+    assert_eq!(
+        delete_account(&s.app, Some(&s.staff), "password123")
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    // 成員列表標出「已刪除」,前端才能不顯示重新啟用按鈕與匿名 Email
+    let (_, members) = call(
+        &s.app,
+        Method::GET,
+        "/t/shop-a/members",
+        None,
+        Some(&s.owner),
+    )
+    .await;
+    let flags: Vec<(bool, bool)> = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["user_id"] == s.staff_id.to_string(),
+                m["deleted"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        flags.iter().all(|(is_staff, deleted)| is_staff == deleted),
+        "{members}"
+    );
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/t/shop-a/members/{}/reactivate", s.staff_id),
+        None,
+        Some(&s.owner),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("刪除"), "{body}");
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM memberships WHERE active AND role = 'staff'"
+        )
+        .await,
+        0
+    );
+}
+
+#[sqlx::test]
 async fn an_owner_must_delete_their_shops_first(pool: PgPool) {
     let s = shop(&pool).await;
     let (status, body) = delete_account(&s.app, Some(&s.owner), "password123").await;

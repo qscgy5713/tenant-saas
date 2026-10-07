@@ -144,9 +144,13 @@ export function TeamPage() {
                   <div className="row-title">
                     {m.name}
                     {self && <span className="chip chip-muted badge-inline">你</span>}
-                    {!m.active && <span className="chip chip-muted badge-inline">已停用</span>}
+                    {!m.active && (
+                      <span className="chip chip-muted badge-inline">
+                        {m.deleted ? '帳號已刪除' : '已停用'}
+                      </span>
+                    )}
                   </div>
-                  <div className="row-sub">{m.email}</div>
+                  {!m.deleted && <div className="row-sub">{m.email}</div>}
                 </div>
               </div>
               <div className="row-actions">

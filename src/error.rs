@@ -34,8 +34,17 @@ pub enum AppError {
     Internal(#[source] anyhow::Error),
 }
 
+/// PostgreSQL `character_not_in_repertoire`:文字裡有資料庫存不了的字元(實際上就是 NUL,`\u0000`)
+const PG_CHARACTER_NOT_IN_REPERTOIRE: &str = "22021";
+
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
+        // 使用者輸入的任何文字欄位(包含不需登入的註冊、公開預約)都可能夾帶 NUL。
+        // 那是輸入錯誤,不是伺服器故障:回 400,不要變成 500 —— 否則任何人都能觸發 5xx 告警。
+        // 在這裡統一處理,不必在每個欄位各自檢查,之後新增的欄位也自動涵蓋
+        if crate::db::pg_code(&err).as_deref() == Some(PG_CHARACTER_NOT_IN_REPERTOIRE) {
+            return AppError::BadRequest("內容含有不允許的字元".into());
+        }
         AppError::Internal(err.into())
     }
 }

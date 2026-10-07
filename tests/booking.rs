@@ -1575,8 +1575,11 @@ async fn cancel_with(s: &Shop, token: &str, id: &str, body: Value) -> (StatusCod
     .await
 }
 
+/// 依去重鍵找信:完全相同,或是「鍵 + `:` + 隨機結尾」(staff_changed 這類每次都要寄的信)
 async fn mail_body(pool: &PgPool, key: &str) -> Option<(String, String)> {
-    sqlx::query_as("SELECT subject, body FROM email_outbox WHERE dedupe_key = $1")
+    sqlx::query_as(
+        "SELECT subject, body FROM email_outbox WHERE dedupe_key = $1 OR dedupe_key LIKE $1 || ':%'",
+    )
         .bind(key)
         .fetch_optional(pool)
         .await
@@ -2114,4 +2117,74 @@ async fn auto_reassign_never_picks_someone_who_was_already_deactivated(pool: PgP
         "只剩已離職的人有空,不能算: {body}"
     );
     assert_eq!(staff_of(&pool, created["id"].as_str().unwrap()).await, b_id);
+}
+
+/// 這個收件者收到的「時間已變更」通知數
+async fn reschedule_mails_to(pool: &PgPool, to: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM email_outbox WHERE subject LIKE '預約時間已變更%' AND to_email = $1",
+    )
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn the_responsible_staff_hears_about_reschedules_they_did_not_make(pool: PgPool) {
+    let s = shop(&pool).await;
+    let (staff_token, b_id) = add_second_staff(&pool, &s).await;
+    let d = day(3);
+    let (_, created) = book(&s.app, &s, Some(b_id), at(d, 10, 0), "c@example.com").await;
+    let id = created["id"].as_str().unwrap();
+    let token = created["manage_token"].as_str().unwrap();
+
+    // 顧客自己改期 → 員工 b 收到通知(內容有顧客、原時間)
+    let (status, body) = call(
+        &s.app,
+        Method::POST,
+        &format!("/public/bookings/{token}/reschedule"),
+        Some(json!({"start": at(d, 11, 0).to_rfc3339()})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (subject, mail): (String, String) = sqlx::query_as(
+        "SELECT subject, body FROM email_outbox WHERE to_email = 'b@example.com'
+         AND subject LIKE '預約時間已變更%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        mail.contains("顧客自己更改了") && mail.contains("顧客") && mail.contains("10:00"),
+        "{subject}\n{mail}"
+    );
+
+    // 管理者(店主)替 b 改期 → b 收到;顧客也收到
+    let reschedule_as = |who: String, h: u32| {
+        let app = s.app.clone();
+        let uri = format!("/t/shop-a/bookings/{id}/reschedule");
+        async move {
+            let (status, body) = call(
+                &app,
+                Method::POST,
+                &uri,
+                Some(json!({"start": at(d, h, 0).to_rfc3339()})),
+                Some(&who),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    };
+    reschedule_as(s.owner.clone(), 12).await;
+    assert_eq!(reschedule_mails_to(&pool, "b@example.com").await, 2);
+    // b 自己改自己的 → 不寄給 b
+    reschedule_as(staff_token.clone(), 13).await;
+    assert_eq!(reschedule_mails_to(&pool, "b@example.com").await, 2);
+
+    // 來回改回同一個時間(12 → 13 → 12):每次顧客都要收到,不能被去重吞掉
+    reschedule_as(s.owner.clone(), 12).await;
+    assert_eq!(reschedule_mails_to(&pool, "c@example.com").await, 3);
+    assert_eq!(reschedule_mails_to(&pool, "b@example.com").await, 3);
 }
