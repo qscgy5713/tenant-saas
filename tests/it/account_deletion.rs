@@ -1,13 +1,14 @@
 //! 使用者帳號刪除(本人要求):匿名化、不能刪的情況。
-mod common;
 
+use crate::common::{
+    add_member, app, call, create_service, create_tenant, register, signup, user_id,
+};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{add_member, app, call, create_service, create_tenant, register, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::availability::local_to_utc;

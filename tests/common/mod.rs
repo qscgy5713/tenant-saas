@@ -27,7 +27,7 @@ pub fn test_config(ttl: u64) -> Config {
         mail_from: "test <test@example.com>".into(),
         public_base_url: "http://app.test".into(),
         max_shops_per_user: 5,
-        // 一般測試註冊後直接開店;驗證流程由 tests/email_verification.rs 用 app_strict 驗證
+        // 一般測試註冊後直接開店;驗證流程由 tests/it/email_verification.rs 用 app_strict 驗證
         require_verified_email: false,
         audit_retention_days: Some(730),
         max_mails_per_recipient_per_hour: 100_000,

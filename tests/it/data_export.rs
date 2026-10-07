@@ -1,12 +1,10 @@
 //! 匯出預約(CSV)與刪除顧客個資(匿名化)。
 
-mod common;
-
-use axum::{Router, http::Method, http::StatusCode};
-use chrono::{Duration, Utc};
-use common::{
+use crate::common::{
     add_member, app, call, create_service, create_tenant, parse_csv, raw_get, signup, user_id,
 };
+use axum::{Router, http::Method, http::StatusCode};
+use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;

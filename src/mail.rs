@@ -352,6 +352,36 @@ pub fn email_verification(to: &str, link: &str) -> Email {
     }
 }
 
+pub fn email_change_link(base_url: &str, token: &str) -> String {
+    // 同重設密碼:token 放在 # 之後
+    format!("{}/admin/change-email#token={token}", base(base_url))
+}
+
+/// 寄到**新**地址:點了才真的換
+pub fn email_change(to: &str, link: &str) -> Email {
+    Email {
+        to: to.to_string(),
+        subject: "請確認您的新 Email".to_string(),
+        body: format!(
+            "您好,\n\n有人申請把帳號的 Email 改成這個地址。如果是您本人,請開啟下列連結完成更換:\n\n  {link}\n\n\
+             連結 24 小時內有效,而且只能使用一次。\n\
+             如果這不是您的操作,請忽略這封信,不會有任何改變。\n"
+        ),
+    }
+}
+
+/// 更換完成後寄到**舊**地址的通知。`{new_email}` 由資料庫函式代入(這時才知道是哪個帳號)
+pub fn email_changed_notice() -> (String, String) {
+    (
+        "您帳號的 Email 已更換".to_string(),
+        "您好,\n\n您帳號的登入 Email 已經改成 {new_email},之後請用新的 Email 登入;\
+         這個地址不會再收到帳號相關的信件。\n\n\
+         如果這不是您本人的操作,代表有人知道您的密碼並登入了您的帳號:\
+         請立即聯絡我們協助取回帳號(新的 Email 不是您的,無法自行重設密碼)。\n"
+            .to_string(),
+    )
+}
+
 pub fn password_reset_link(base_url: &str, token: &str) -> String {
     // token 放在 # 之後:不會送到任何伺服器、不進存取紀錄與 Referer
     format!("{}/admin/reset#token={token}", base(base_url))

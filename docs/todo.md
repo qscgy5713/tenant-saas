@@ -21,7 +21,7 @@
 - [x] 登入 API(argon2 驗證)
 - [x] JWT 機制(只放 user id,租戶每個請求另外驗證)
 - [x] 登入限流(防暴力破解):`credential_routes` 掛 `rate_limit_auth`,測試 `login_and_register_are_rate_limited_per_client`;另有帳號層級鎖定
-- [x] 評估 users 的暴露面:結論是用**欄位層級權限**而非 SECURITY DEFINER 函式 —— `tenant_app` 只能讀 `users(id, email, name, created_at)`,讀不到 `password_hash`(`tests/tenancy.rs` 驗證);`tenant_runtime`(登入用)才有整張表。殘留風險:`tenant_app` 若遭 SQL injection 仍可列出所有使用者的 Email 與名稱(`users` 沒有 RLS)
+- [x] 評估 users 的暴露面:結論是用**欄位層級權限**而非 SECURITY DEFINER 函式 —— `tenant_app` 只能讀 `users(id, email, name, created_at)`,讀不到 `password_hash`(`tests/it/tenancy.rs` 驗證);`tenant_runtime`(登入用)才有整張表。殘留風險:`tenant_app` 若遭 SQL injection 仍可列出所有使用者的 Email 與名稱(`users` 沒有 RLS)
 - [x] 認證 extractor
 
 ## M3 多租戶核心
@@ -121,7 +121,8 @@
 - [ ] 稽核歸檔的缺口:要自己設排程與異地保存(沒有自動寫到物件儲存);量大時資料表需分區;保留期限是全系統一個值,店家不能各自調整
 - [x] 稽核日誌匯出(CSV):`GET /t/{slug}/audit-logs/export.csv`(管理者以上),同列表的篩選條件 + 日期範圍;UTF-8 BOM、CRLF、**試算表公式注入防護**(`=` `+` `-` `@` 開頭加單引號)、UTC 與店家當地時間兩欄;上限 50,000 筆(超過回 400 要求縮小範圍,不截斷);匯出本身留一筆 `audit.exported`;後台稽核頁有「匯出 CSV」
 - [ ] 稽核匯出的缺口:一次載入整個檔案到記憶體(50,000 筆約 10 MB,所以才有上限);沒有串流 / 背景產生;只有 CSV
-- [ ] 沒有被記錄的事件:登入 / 登出 / 註冊、授權失敗(403)。**稽核表屬於店家(`tenant_id NOT NULL`),帳號層級的事件沒有歸屬**,要記需要另一張「帳號安全事件」表(不帶租戶)與對應的查看畫面;目前只有日誌 + 指標(`account_locked_total` 等)
+- [x] 帳號層級事件(註冊、登入、失敗、鎖定、登出所有裝置、重設密碼、驗證 Email)記在不帶租戶的 `account_events`(0033),本人可在店家列表的「最近的帳號活動」看
+- [ ] 沒有被記錄的事件:授權失敗(403)只有日誌與指標;單一裝置的登出不記(沒有伺服器端 session)
 - [x] 查看顧客個資留稽核紀錄:`customer.listed`(筆數、是否搜尋、offset)與 `customer.viewed`(顧客 id、預約紀錄筆數);**不記搜尋字串**(常常就是姓名 / 電話 / Email);失敗或沒權限的不留紀錄
 - [ ] 查看顧客個資的缺口:預約列表(含顧客姓名 / Email)、預約詳情、員工自己行程裡的顧客資料沒有稽核(日常操作,每次都記會淹沒真正重要的紀錄)
 - [x] 告警規則(`deploy/alerts.yml` 9 條 + `alerts_test.yml` 行為測試,CI 的 `deploy-config` 工作會跑)。門檻是起點,沒有在真實流量下調校過
@@ -135,10 +136,11 @@
 - [x] 部署文件 `docs/deployment.md`(角色、步驟、環境變數、反向代理、監控、備份、上線前檢查表)
 - [x] 註冊 / 登入限流(防暴力破解)
 - [x] 帳號鎖定:同一帳號連續登入失敗 5 次鎖 15 分鐘(補上依 IP 限流擋不住的分散式猜密碼);鎖定中連正確密碼都不收、對外與「密碼錯誤」「帳號不存在」同一個 401;鎖定時寄信通知;重設密碼解鎖;日誌與指標(`account_locked_total`、`login_rejected_locked_total`)
-- [ ] 帳號鎖定沒寫進 `audit_logs`(稽核表屬於店家,帳號層級事件沒有 tenant_id);目前只有日誌 + 指標 + 通知信。另外,攻擊者可故意輸錯把別人鎖 15 分鐘(無法登入但不影響忘記密碼),尚無 CAPTCHA
+- [ ] 帳號鎖定的缺口:攻擊者可故意輸錯把別人鎖 15 分鐘(無法登入但不影響忘記密碼),尚無 CAPTCHA。(鎖定本身已記在 `account_events`,不進店家的 `audit_logs`)
 - [x] production 沒設 `SMTP_URL` 就拒絕啟動(Log 模式會把一次性連結印進日誌)
-- [x] CI 已在 GitHub 上實際執行(每次 push 觸發,5 個工作:test / restricted-role / web / 2 個 docker)。曾抓到一次間歇性失敗:`CREATE ROLE tenant_runtime` 在平行測試間的競態(見 decisions)
-- [ ] 正式環境的 TLS 連線資料庫(`sslmode=require`)尚未實測
+- [x] CI 已在 GitHub 上實際執行(每次 push 與每週一觸發,8 個工作:test / restricted-role / web / e2e / deploy-config / dependency-scan / 2 個 docker)。曾抓到一次間歇性失敗:`CREATE ROLE tenant_runtime` 在平行測試間的競態(見 decisions)
+- [x] 資料庫 TLS 連線實測(`require` 與 `verify-full`,應用程式 / migration / 備份);順便發現並修正:**migrator 帳號備份不了 FORCE RLS 的表**,改用專用的 `tenant_backup`(`deploy/provision_backup.sql`),CI 每次實際備份 + 還原比對
+- [x] 更換 Email(確認信寄到新地址,點了才換;通知舊地址;寄到舊地址的連結作廢)
 - [ ] 映像簽章(要先決定 registry)
 - [x] 正式環境 compose 範例(`deploy/docker-compose.prod.yml`)。**已在本機完整演練(建置、migrate、production 模式啟動、真實瀏覽器流程、Prometheus 規則,見 deployment「Docker Compose 部署範例」),但沒有在真實主機與真實 HTTPS 上驗證**;不含資料庫(請用託管 PostgreSQL)
 - [ ] 其他尚未做的上線前項目見 `docs/deployment.md` 檢查表「尚未做」區(營運人員後台、跨實例限流、負載測試)
@@ -159,7 +161,7 @@
 - [x] JWT 撤銷:改密碼 / 重設密碼 / 「登出所有裝置」都會讓舊 token 立刻失效(每個請求查資料庫)
 - [ ] 單一裝置登出(只清 cookie,偷到 token 的人到期前仍可用 Bearer,除非改密碼或登出所有裝置);沒有「登入中的裝置」清單 —— 要做需要伺服器端 session 表
 - [x] 註冊 Email 驗證:沒驗證不能建立店家(其他功能不受影響);重寄每小時 3 封;邀請 / 重設密碼連結也算驗證
-- [ ] Email 驗證的缺口:不能更換 Email(30 天內沒驗證的帳號會被清理,Email 釋出)
+- [ ] Email 驗證 / 更換的缺口:30 天內沒驗證(也沒加入店家)的帳號會被清理;更換 Email 不會搬移寄到舊地址、還沒接受的邀請(要請店家重新邀請);被盜用者換掉 Email 後,原主人只能聯絡營運人員取回(沒有自助申訴流程)
 - [x] 後台:變更店家名稱 / 時區(僅店主;網址代稱不可改)
 - [x] 後台:匯出預約(CSV,管理者以上):日期範圍(與期間重疊的預約,含已取消)、公式注入防護、UTC 與店家當地時間、上限 50,000 筆、匯出留稽核 `booking.exported`(不含個資)
 - [x] 刪除顧客個資(匿名化,僅擁有者,不可還原):姓名 / Email / 電話換成無法還原的代號,預約備註清空,沒寄出的信刪除、已寄出的信件紀錄改匿名地址;預約本身保留(統計);還有未來 / 待確認預約時拒絕;留稽核 `customer.anonymized`
@@ -177,9 +179,10 @@
 - [x] 順便修掉的 bug:顧客改期後不會再收到新時間的提醒信(`reminder_queued_at` 沒重置、去重鍵沒變)
 - [x] 沒收到確認信可「重新寄送」(預約編號 + Email 確認身分,換新 token、舊連結失效、最多 3 次、間隔 60 秒、不洩漏預約是否存在)
 - [x] 加到行事曆(.ics,改期後重新下載會更新同一個事件)
-- [ ] 地圖 / 店家資訊 / 營業時間(後端沒有店家簡介、地址欄位)
+- [x] 店家資訊(簡介 / 地址 / 電話,0034)與地圖連結
+- [ ] 預約頁沒有列出店家的營業時間(營業時間是每位員工各自的,要先決定「店家營業時間」怎麼定義;顧客目前從可預約時段看得出來)
 - [ ] 多語系(目前只有繁體中文)、幣別(後端沒有欄位,暫以新台幣顯示)
-- [x] 瀏覽器端的端對端測試(Playwright,`web/e2e/`,11 個測試,CI 的 `e2e` 工作):註冊 / 登入 cookie / CSRF / 顧客預約全流程(含真實 SMTP 收信)/ 拖曳改期 / 員工停用(含改派)/ 帳號鎖定與重設密碼
+- [x] 瀏覽器端的端對端測試(Playwright,`web/e2e/`,7 個檔案 18 個測試,CI 的 `e2e` 工作):註冊 / 登入 cookie / CSRF / 顧客預約全流程(含真實 SMTP 收信)/ 拖曳改期 / 員工停用(含改派)/ 帳號鎖定與重設密碼
 - [ ] 端對端測試尚未涵蓋:Stripe 付款流程;可及性只測了鍵盤登入與對話框焦點(沒有螢幕閱讀器);多瀏覽器只有 Chromium + WebKit 的關鍵流程(Firefox 在作者的機器上無法啟動,未驗證)
 - [x] 頁面開著跨過午夜,「今天」會自動更新(`useToday(timezone)`:店家時區午夜的計時器 + 分頁重新可見 / 視窗取得焦點時再檢查);套用在總覽、預約頁、週 / 月日曆、顧客的日期選擇(換日時整個重來)
 - [ ] 跨午夜更新沒涵蓋:休假表單的預設日期(每次開啟時重新取,不受影響)、「預約已開始」的判斷(另有 `useNow` 每 30 秒更新)

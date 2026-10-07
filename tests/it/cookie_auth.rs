@@ -1,13 +1,11 @@
 //! 瀏覽器登入:HttpOnly cookie + Origin 檢查(CSRF)。
 
-mod common;
-
+use crate::common::{app, call, register, test_config};
 use axum::{
     Router,
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
-use common::{app, call, register, test_config};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;

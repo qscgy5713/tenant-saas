@@ -1,7 +1,5 @@
-mod common;
-
+use crate::common::{app, call, register};
 use axum::http::{Method, StatusCode};
-use common::{app, call, register};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::{

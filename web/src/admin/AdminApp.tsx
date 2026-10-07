@@ -15,6 +15,7 @@ import { TeamPage } from './pages/TeamPage'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
 import { ResetPasswordPage } from './pages/ResetPasswordPage'
 import { VerifyEmailPage } from './pages/VerifyEmailPage'
+import { ChangeEmailPage } from './pages/ChangeEmailPage'
 import { CustomersPage } from './pages/CustomersPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ShopLayout } from './ShopLayout'
@@ -30,6 +31,7 @@ export default function AdminApp() {
       <Route path="forgot" element={<ForgotPasswordPage />} />
       <Route path="reset" element={<ResetPasswordPage />} />
       <Route path="verify" element={<VerifyEmailPage />} />
+      <Route path="change-email" element={<ChangeEmailPage />} />
       <Route element={<RequireAuth />}>
         <Route index element={<ShopsPage />} />
         <Route path=":slug" element={<ShopLayout />}>

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use axum::http::{Method, StatusCode, header};
 use chrono::{TimeZone, Utc};
@@ -73,7 +73,7 @@ fn calendar_has_required_fields_utc_times_and_crlf() {
 
 #[sqlx::test]
 async fn customers_download_an_ics_only_for_confirmed_bookings(pool: sqlx::PgPool) {
-    use common::{add_member, app, call, create_tenant, signup};
+    use crate::common::{add_member, app, call, create_tenant, signup};
     use serde_json::json;
     let app = app(pool.clone());
     let owner = signup(&app, "o@example.com").await;

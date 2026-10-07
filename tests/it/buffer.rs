@@ -1,11 +1,9 @@
 //! 服務的整理時間(緩衝):結束後員工多久不能接下一筆。
 
-mod common;
-
+use crate::common::{add_member, app, call, create_tenant, signup, user_id};
 use axum::{Router, http::Method, http::StatusCode};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{add_member, app, call, create_tenant, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::availability::local_to_utc;

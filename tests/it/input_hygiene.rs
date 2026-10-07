@@ -1,8 +1,7 @@
 //! 文字欄位裡的 NUL 等控制字元:資料庫存不了 NUL(會變成 500 並觸發 5xx 告警),一律要在入口回 400。
-mod common;
 
+use crate::common::{app, call, create_tenant, signup};
 use axum::http::{Method, StatusCode};
-use common::{app, call, create_tenant, signup};
 use serde_json::json;
 use sqlx::PgPool;
 

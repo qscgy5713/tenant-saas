@@ -6,8 +6,14 @@ import { Avatar } from '../../components/Avatar'
 import { ArrowRightIcon, LogOutIcon, PlusIcon } from '../../components/Icons'
 import { ErrorState, Loading, Notice } from '../../components/States'
 import { useTitle } from '../../lib/useTitle'
-import { validateName, validateSlug } from '../../lib/validate'
-import { createShop, listAccountEvents, listShops, resendVerification } from '../api'
+import { validateEmail, validateName, validateSlug } from '../../lib/validate'
+import {
+  createShop,
+  listAccountEvents,
+  listShops,
+  requestEmailChange,
+  resendVerification,
+} from '../api'
 import { ConfirmDialog, Modal } from '../components/Modal'
 import { TextField } from '../components/AuthCard'
 import { useDeleteAccount, useLogout, useLogoutAll } from '../logout'
@@ -26,6 +32,7 @@ export function ShopsPage() {
   const [signingOutAll, setSigningOutAll] = useState(false)
   const logoutAll = useLogoutAll()
   const logoutAllMutation = useMutation({ mutationFn: logoutAll })
+  const [changingEmail, setChangingEmail] = useState(false)
   const [deletingAccount, setDeletingAccount] = useState(false)
   const [password, setPassword] = useState('')
   const deleteAccount = useDeleteAccount()
@@ -53,7 +60,12 @@ export function ShopsPage() {
         </div>
       </header>
 
-      {session && !session.user.email_verified && <VerifyEmailNotice email={session.user.email} />}
+      {session && !session.user.email_verified && (
+        <VerifyEmailNotice
+          email={session.user.email}
+          onChangeEmail={() => setChangingEmail(true)}
+        />
+      )}
 
       {shops.isPending && <Loading label="載入店家…" />}
       {shops.isError && <ErrorState error={shops.error} onRetry={() => shops.refetch()} />}
@@ -96,7 +108,15 @@ export function ShopsPage() {
 
       <CreateShopModal open={creating} onClose={() => setCreating(false)} />
       <AccountActivity />
+      <ChangeEmailModal
+        open={changingEmail}
+        current={session?.user.email ?? ''}
+        onClose={() => setChangingEmail(false)}
+      />
       <p className="shops-foot">
+        <button type="button" className="link-btn" onClick={() => setChangingEmail(true)}>
+          更換 Email
+        </button>
         <button type="button" className="link-btn" onClick={() => setDeletingAccount(true)}>
           刪除我的帳號
         </button>
@@ -152,7 +172,7 @@ export function ShopsPage() {
 }
 
 /** 還沒驗證 Email:提醒、可重寄,在別處點了連結後可以重新檢查 */
-function VerifyEmailNotice({ email }: { email: string }) {
+function VerifyEmailNotice({ email, onChangeEmail }: { email: string; onChangeEmail: () => void }) {
   const resend = useMutation({ mutationFn: resendVerification })
   const recheck = useMutation({ mutationFn: restoreSession })
   return (
@@ -187,8 +207,105 @@ function VerifyEmailNotice({ email }: { email: string }) {
         >
           我已驗證,重新檢查
         </button>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={onChangeEmail}>
+          Email 打錯了?更換
+        </button>
       </div>
     </div>
+  )
+}
+
+/** 更換 Email:重新輸入密碼,確認信寄到新地址,點了才換(目前的 Email 在那之前照常使用) */
+function ChangeEmailModal({
+  open,
+  current,
+  onClose,
+}: {
+  open: boolean
+  current: string
+  onClose: () => void
+}) {
+  const [values, setValues] = useState({ email: '', password: '' })
+  const [emailError, setEmailError] = useState<string | null>(null)
+  const mutation = useMutation({
+    mutationFn: () => requestEmailChange(values.email.trim(), values.password),
+  })
+  const close = () => {
+    setValues({ email: '', password: '' })
+    setEmailError(null)
+    mutation.reset()
+    onClose()
+  }
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const found = validateEmail(values.email)
+    setEmailError(found)
+    if (!found) mutation.mutate()
+  }
+
+  return (
+    <Modal open={open} title="更換 Email" onClose={close}>
+      {mutation.isSuccess ? (
+        <>
+          <Notice tone="success">
+            {mutation.data.message}在那之前請繼續用 {current} 登入。
+          </Notice>
+          <div className="actions">
+            <button type="button" className="btn btn-primary" onClick={close}>
+              知道了
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {mutation.error && (
+            <Notice tone="error">
+              {mutation.error instanceof ApiError && mutation.error.status === 429
+                ? '這個小時已經申請太多次,請稍後再試。'
+                : mutation.error instanceof ApiError
+                  ? mutation.error.message
+                  : '申請失敗,請再試一次。'}
+            </Notice>
+          )}
+          <p className="muted small">
+            目前是 {current}。確認信會寄到新的 Email,開啟信中的連結後才會更換。
+          </p>
+          <form className="form form-plain" onSubmit={submit} noValidate>
+            <TextField label="新的 Email" error={emailError ?? undefined}>
+              <input
+                name="new_email"
+                type="email"
+                autoComplete="email"
+                value={values.email}
+                onChange={(e) => setValues({ ...values, email: e.target.value })}
+                aria-invalid={!!emailError}
+              />
+            </TextField>
+            <TextField label="輸入密碼確認">
+              <input
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                value={values.password}
+                onChange={(e) => setValues({ ...values, password: e.target.value })}
+              />
+            </TextField>
+            <div className="actions">
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={mutation.isPending || !values.password}
+              >
+                {mutation.isPending ? '寄送中…' : '寄送確認信'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={close}>
+                取消
+              </button>
+            </div>
+          </form>
+        </>
+      )}
+    </Modal>
   )
 }
 
@@ -285,6 +402,7 @@ const EVENT_LABEL: Record<AccountEvent['kind'], string> = {
   logout_all: '登出所有裝置',
   password_reset: '重設密碼',
   email_verified: '驗證 Email',
+  email_changed: '更換 Email',
 }
 
 /** 最近的帳號活動:看到不是自己的登入或一直失敗的嘗試,就該改密碼 / 登出所有裝置 */

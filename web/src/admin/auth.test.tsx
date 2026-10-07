@@ -452,6 +452,100 @@ describe('Email 驗證', () => {
   })
 })
 
+describe('更換 Email', () => {
+  it('店家列表:新 Email 與密碼 → 送出;前端先擋格式;成功後說明在確認前仍用舊 Email', async () => {
+    loginAs()
+    const calls: unknown[] = []
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/change-email`, async ({ request }) => {
+        calls.push(await request.json())
+        return HttpResponse.json(
+          { message: '確認信已寄到新的 Email,開啟信中的連結後才會更換。' },
+          { status: 202 },
+        )
+      }),
+    )
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '更換 Email' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(new RegExp(`目前是 ${USER.email}`))).toBeInTheDocument()
+    await user.type(within(dialog).getByLabelText('新的 Email'), 'not-an-email')
+    await user.type(within(dialog).getByLabelText('輸入密碼確認'), 'my-password-1')
+    await user.click(within(dialog).getByRole('button', { name: '寄送確認信' }))
+    expect(calls).toHaveLength(0)
+
+    await user.clear(within(dialog).getByLabelText('新的 Email'))
+    await user.type(within(dialog).getByLabelText('新的 Email'), ' new@example.com ')
+    await user.click(within(dialog).getByRole('button', { name: '寄送確認信' }))
+    expect(await within(dialog).findByText(/確認信已寄到新的 Email/)).toHaveTextContent(
+      `請繼續用 ${USER.email} 登入`,
+    )
+    expect(calls).toEqual([{ new_email: 'new@example.com', password: 'my-password-1' }])
+  })
+
+  it('錯誤:已被使用顯示後端訊息;太頻繁顯示稍後再試', async () => {
+    loginAs()
+    let status = 409
+    server.use(
+      http.get(`${API}/tenants`, () => HttpResponse.json([SHOP()])),
+      http.post(`${API}/auth/change-email`, () =>
+        error(status, status === 409 ? '這個 Email 已經被其他帳號使用' : '請求過於頻繁'),
+      ),
+    )
+    renderApp('/admin')
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '更換 Email' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('新的 Email'), 'b@example.com')
+    await user.type(within(dialog).getByLabelText('輸入密碼確認'), 'my-password-1')
+    await user.click(within(dialog).getByRole('button', { name: '寄送確認信' }))
+    expect(await within(dialog).findByText('這個 Email 已經被其他帳號使用')).toBeInTheDocument()
+    status = 429
+    await user.click(within(dialog).getByRole('button', { name: '寄送確認信' }))
+    expect(await within(dialog).findByText(/申請太多次/)).toBeInTheDocument()
+  })
+
+  it('還沒驗證的人可以從提醒直接更換(註冊時打錯 Email)', async () => {
+    loginAs({ ...USER, email_verified: false })
+    server.use(http.get(`${API}/tenants`, () => HttpResponse.json([])))
+    renderApp('/admin')
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Email 打錯了?更換' }))
+    expect(await screen.findByRole('dialog', { name: '更換 Email' })).toBeInTheDocument()
+  })
+
+  it('新地址收到的連結:token 從 # 讀取、只送一次、成功顯示後端訊息', async () => {
+    const calls: unknown[] = []
+    server.use(
+      http.post(`${API}/auth/confirm-email-change`, async ({ request }) => {
+        calls.push(await request.json())
+        return HttpResponse.json({ message: 'Email 已更換,之後請用新的 Email 登入。' })
+      }),
+    )
+    const token = 'f'.repeat(64)
+    renderApp(`/admin/change-email#token=${token}`, { strict: true })
+    expect(await screen.findByText('Email 已更換,之後請用新的 Email 登入。')).toBeInTheDocument()
+    expect(calls).toEqual([{ token }])
+  })
+
+  it('連結不完整:不送出;過期:顯示後端訊息', async () => {
+    let called = 0
+    server.use(
+      http.post(`${API}/auth/confirm-email-change`, () => {
+        called += 1
+        return error(400, '連結無效或已過期,請登入後重新申請')
+      }),
+    )
+    const first = renderApp('/admin/change-email#token=short')
+    expect(await screen.findByText(/連結不完整/)).toBeInTheDocument()
+    expect(called).toBe(0)
+    first.unmount()
+    renderApp(`/admin/change-email#token=${'g'.repeat(64)}`)
+    expect(await screen.findByRole('alert')).toHaveTextContent('已過期')
+  })
+})
+
 describe('登出所有裝置', () => {
   it('確認後呼叫後端,成功才清除登入並回到登入頁', async () => {
     loginAs()

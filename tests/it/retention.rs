@@ -1,13 +1,13 @@
 //! 資料保留:顧客個資到期自動匿名化、稽核日誌到期清除、刪除店家(30 天寬限)。
-mod common;
+use crate::common;
 
+use crate::common::{add_member, app, call, create_service, create_tenant, signup, user_id};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{add_member, app, call, create_service, create_tenant, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::{availability::local_to_utc, worker::retention_sweep};

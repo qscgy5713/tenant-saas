@@ -3,7 +3,10 @@ import {
   addStaff,
   bookAsOwner,
   createShop,
+  linkIn,
+  loginViaUi,
   makeBookable,
+  register,
   signIn,
   taipeiAt,
   taipeiDay,
@@ -207,4 +210,32 @@ test.describe('鍵盤操作', () => {
     await expect(dialog).toBeHidden()
     await expect(trigger).toBeFocused()
   })
+})
+
+test('更換 Email:申請 → 新信箱收到連結並開啟 → 舊信箱收到通知 → 之後只能用新 Email 登入', async ({
+  page,
+  request,
+}) => {
+  const account = await register(request, '換信箱的人', 'mover')
+  const newEmail = `moved-${uniq()}@example.com`
+  await signIn(page, account.email)
+  await page.getByRole('button', { name: '更換 Email' }).click()
+  const dialog = page.getByRole('dialog', { name: '更換 Email' })
+  await dialog.getByLabel('新的 Email').fill(newEmail)
+  await dialog.getByLabel('輸入密碼確認').fill(account.password)
+  await dialog.getByRole('button', { name: '寄送確認信' }).click()
+  await expect(dialog.getByText(/確認信已寄到新的 Email/)).toBeVisible()
+
+  const mail = await waitForMail(request, newEmail, '新 Email')
+  await page.goto(linkIn(mail, '/admin/change-email'))
+  await expect(page.getByText('Email 已更換,之後請用新的 Email 登入。')).toBeVisible()
+  const notice = await waitForMail(request, account.email, '已更換')
+  expect(notice.text).toContain(newEmail)
+
+  // 舊 Email 登入不了,新的可以
+  await page.context().clearCookies()
+  await loginViaUi(page, account.email)
+  await expect(page.getByRole('alert')).toBeVisible()
+  await signIn(page, newEmail)
+  await expect(page.getByRole('heading', { name: '我的店家' })).toBeVisible()
 })

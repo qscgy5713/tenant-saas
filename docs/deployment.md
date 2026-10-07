@@ -59,6 +59,18 @@ psql "postgres://tenant_migrator:密碼@DB_HOST/tenant_saas" \
      -c "ALTER ROLE tenant_runtime WITH LOGIN PASSWORD '換成另一組強密碼'"
 ```
 
+### 3b. 建立備份帳號(管理員,一次性)
+
+```bash
+psql "postgres://admin@DB_HOST/postgres" \
+     -v backup_password="'換成第三組強密碼'" \
+     -f deploy/provision_backup.sql
+```
+
+`tenant_backup`:`BYPASSRLS` + `pg_read_all_data`,**只能讀**、不是超級使用者。**不能用 migrator 備份**:
+`customers`、`services` 等表是 FORCE RLS,連擁有者都受限,`pg_dump` 會直接失敗(見「備份與還原」)。
+`BYPASSRLS` 只有超級使用者能授予;託管資料庫不允許時,改用服務商的管理員帳號備份。
+
 ### 4. 啟動應用程式(以 runtime)
 
 ```bash
@@ -71,6 +83,16 @@ docker run -d --name tenant-saas -p 127.0.0.1:3001:3001 \
   -e METRICS_TOKEN="$(openssl rand -hex 16)" \
   tenant-saas:VERSION
 ```
+
+**資料庫連線的 TLS**(已對「只接受 TLS 連線」的 PostgreSQL 實測,應用程式、migration、`pg_dump` 三者都可以):
+
+| `sslmode` | 加密 | 驗證伺服器憑證 | 建議 |
+|---|---|---|---|
+| `require` | 是 | **否**(能防竊聽,不能防冒充的伺服器) | 資料庫在同一個私有網路時可接受 |
+| `verify-full` + `sslrootcert=/路徑/ca.crt` | 是 | 是(簽發者與主機名稱) | **資料庫不在同一個私有網路時用這個**;CA 檔由託管服務商提供,掛進容器 |
+
+實測:伺服器只收 TLS 時 `sslmode=disable` 被拒絕;`verify-full` 配錯的 CA 會拒絕連線(`UnknownIssuer`)。
+資料庫端建議在 `pg_hba.conf` 只留 `hostssl`,讓沒加密的連線根本進不來。
 
 映像預設 `APP_ENV=production`、`LOG_FORMAT=json`、以非 root(uid 10001)執行,內建 `HEALTHCHECK`。
 production 模式**預設不在啟動時套用 migration**(執行階段帳號本來就沒有建表權限)。
@@ -274,13 +296,14 @@ docker run --rm --entrypoint promtool -v "$PWD/deploy:/d" prom/prometheus:latest
 `deploy/backup.sh`(cron 每天一次):`pg_dump` custom 格式 → 先寫暫存檔並用 `pg_restore --list` 驗證能讀 → 才改名成正式檔案(不會留下半份備份,權限 600)→ 清理超過 `BACKUP_RETENTION_DAYS`(預設 35)天的舊備份,**但永遠保留最新 `BACKUP_KEEP_MIN`(預設 3)份**,備份壞掉一陣子時不會把僅存的備份清光。`deploy/backup_test.sh` 測試清理與驗證邏輯(CI 會跑)。
 
 ```bash
-BACKUP_DATABASE_URL='postgres://tenant_migrator:密碼@DB_HOST/tenant_saas?sslmode=require' \
+BACKUP_DATABASE_URL='postgres://tenant_backup:密碼@DB_HOST/tenant_saas?sslmode=require' \
 BACKUP_DIR=/var/backups/tenant-saas  deploy/backup.sh
 ```
 
-- 用 migrator 或專用的備份帳號,**不要用 runtime 帳號**(它讀不到租戶資料表)。備份檔要放在**不是資料庫主機**的地方,並且另外複製到異地。
+- **用備份帳號 `tenant_backup`**(「第一次部署」步驟 3b)。**不能用 migrator**:FORCE RLS 的表連擁有者都受限,`pg_dump` 會直接失敗;加上 `--enable-row-security` 則會「成功」但那些表是空的。**不要用 runtime 帳號**(它讀不到租戶資料表)。
+- **確認備份是完整的**:還原到另一個資料庫,比對各表筆數(CI 的 `restricted-role` 工作每次都這樣做:用 `tenant_backup` 備份 → 還原 → 逐表比對,包含 `customers`)。換了備份帳號或資料庫服務商之後,至少手動做一次。備份檔要放在**不是資料庫主機**的地方,並且另外複製到異地。
 - **角色是整個叢集共用的,不在資料庫備份裡**:另外用 `pg_dumpall --roles-only` 備份,或還原到新叢集時先照「第一次部署」的步驟 1–3 建立 migrator 與角色。
-- 已用真實的 `pg_dump` / `pg_restore` 演練過備份與還原(還原後的使用者、店家、migration 筆數與來源一致)。**還原到新叢集後還要重新啟用 runtime 帳號的登入與角色授權**(同「第一次部署」步驟 3)。
+- 已用真實的 `pg_dump` / `pg_restore` 演練過備份與還原(還原後各表筆數與來源一致)。**注意**:早期的演練是用超級使用者做的,所以沒發現 migrator 備份不了;現在的演練與 CI 都用 `tenant_backup`。**還原到新叢集後還要重新啟用 runtime 帳號的登入與角色授權**(同「第一次部署」步驟 3)。
 - **`BACKUP_RETENTION_DAYS` 就是「刪除資料的請求真正從系統消失」的最長期限**:匿名化與刪除只作用在線上資料庫,備份裡的資料不會變。請依你的隱私政策決定天數,並寫進隱私權說明。
 - **還原會讓已刪除的資料復活。** 從備份還原之後,備份時間點之後做的匿名化(顧客資料刪除、帳號刪除)會消失。應用程式日誌會記下每次刪除的 id(`顧客資料已刪除(匿名化)`、`使用者帳號已刪除(匿名化)`、`依保留政策匿名化顧客`,只有 id 沒有個資):還原後請依日誌把這些重做一次,**日誌也要保存得比備份久**。依保留政策到期的資料會由背景任務自動再處理一次。
 - 稽核日誌(`audit_logs`):一般角色只能新增;只有保留政策的清理函式能刪過期的(見「資料保留與刪除」)。
@@ -303,6 +326,7 @@ BACKUP_DIR=/var/backups/tenant-saas  deploy/backup.sh
 - [x] 帳號鎖定(5 次 / 15 分鐘);告警建議:`account_locked_total` 突然升高代表有人在猜密碼
 - [x] 註冊 Email 驗證(沒驗證不能建立店家)、登出所有裝置。**不做 refresh token**:每個請求本來就查資料庫,改密碼 / 登出所有裝置都會立刻讓舊 token 失效(見 decisions)。缺的是「單一裝置登出」與「session 清單」
 - [x] 資料保留與刪除(顧客個資自動匿名化、稽核日誌到期清除、刪除店家);使用者帳號刪除、備份腳本與到期清理也已完成;稽核日誌可在清除前用 `admin export-audit` 歸檔;**尚缺**:備份的異地複製與加密(腳本只負責產生與清理)、排程(cron)要自己設
+- [x] 資料庫連線 TLS:`sslmode=require` / `verify-full` 已對只收 TLS 的 PostgreSQL 實測(應用程式、migration、備份)
 - [ ] 全域(跨實例)限流
 - [x] 告警規則檔(`deploy/alerts.yml`)
 - [ ] 分散式追蹤

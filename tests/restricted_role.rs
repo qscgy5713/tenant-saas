@@ -810,6 +810,61 @@ async fn whole_app_works_with_the_restricted_runtime_account() {
     )
     .await;
     assert_eq!(old["role"], "manager");
+
+    // 6e. 更換 Email(request_email_change / confirm_email_change,內部呼叫 mail_quota_ok)
+    // 前面「登出所有裝置」讓舊的登入失效了,重新登入
+    let (status, body) = call(
+        &strict,
+        Method::POST,
+        "/auth/login",
+        Some(json!({"email": newcomer, "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let newcomer_token = body["token"].as_str().unwrap().to_string();
+    let changed = format!("changed-{unique}@example.com");
+    let (status, body) = call(
+        &strict,
+        Method::POST,
+        "/auth/change-email",
+        Some(json!({"new_email": changed, "password": "password123"})),
+        Some(&newcomer_token),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "申請更換 Email 要能在受限帳號下運作: {body}"
+    );
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    let change_mail = mail_of(&memory, &changed, "新 Email").expect("確認信要寄到新地址");
+    let change_token: String = change_mail
+        .body
+        .split("/admin/change-email#token=")
+        .nth(1)
+        .unwrap()
+        .chars()
+        .take(64)
+        .collect();
+    let (status, body) = call(
+        &strict,
+        Method::POST,
+        "/auth/confirm-email-change",
+        Some(json!({"token": change_token})),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "確認更換 Email 要能在受限帳號下運作: {body}"
+    );
+    tick(&pool, &mailer, "http://app.test").await.unwrap();
+    assert!(
+        mail_of(&memory, &newcomer, "已更換").is_some(),
+        "舊地址要收到通知"
+    );
 }
 
 fn owner_uuid(me: &Value) -> Uuid {

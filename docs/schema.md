@@ -93,7 +93,7 @@ CREATE POLICY tenants_select ON tenants FOR SELECT USING (
 - `tenant_id_by_slug(slug) -> uuid`:公開預約頁依子網域取得租戶 id(M4.5 實作)
 - `accept_invitation(token_hash) -> uuid`(M5 實作,使用者取自上下文):被邀請者點連結時還不是成員,沒有租戶上下文,由函式驗證 token、檢查期限並建立 membership
 
-已知限制:`users` 沒有 RLS,`tenant_app` 若遭 SQL injection 可列出所有使用者的 Email 與名稱。**讀不到密碼雜湊**:`tenant_app` 只被授予 `users(id, email, name, created_at)` 的欄位層級 SELECT(`tests/tenancy.rs` 驗證)。登入用的 `tenant_runtime` 才有整張表,但它碰不到任何租戶資料表。評估過改用 `SECURITY DEFINER` 函式包裝 `users` 查詢,結論是欄位層級權限已足夠,不再做。
+已知限制:`users` 沒有 RLS,`tenant_app` 若遭 SQL injection 可列出所有使用者的 Email 與名稱。**讀不到密碼雜湊**:`tenant_app` 只被授予 `users(id, email, name, created_at)` 的欄位層級 SELECT(`tests/it/tenancy.rs` 驗證)。登入用的 `tenant_runtime` 才有整張表,但它碰不到任何租戶資料表。評估過改用 `SECURITY DEFINER` 函式包裝 `users` 查詢,結論是欄位層級權限已足夠,不再做。
 
 ## 租戶表
 
@@ -247,7 +247,7 @@ CREATE POLICY tenant_isolation ON services
 
 ## 隔離測試清單(M3 必做)
 
-狀態:1、2、3、4、6、7 已在 `tests/tenancy.rs` 實作並通過;5、8 要等 `bookings` 資料表(M4.5)。另做過破壞性驗證:移除 `services` 的 RLS 後有 5 項測試失敗,證明測試確實守著隔離。
+狀態:1、2、3、4、6、7 已在 `tests/it/tenancy.rs` 實作並通過;5、8 要等 `bookings` 資料表(M4.5)。另做過破壞性驗證:移除 `services` 的 RLS 後有 5 項測試失敗,證明測試確實守著隔離。
 
 1. 租戶 A 的請求查 `services`,看不到租戶 B 的資料
 2. 未設定 `app.tenant_id` 時,所有租戶表查詢都回 0 筆
@@ -302,6 +302,7 @@ CREATE POLICY tenant_isolation ON services
 | `tenants.deletion_requested_at` / `deletion_scheduled_at` | 申請刪除;非 NULL 時公開預約頁與預約管理連結關閉、不能新增預約 | 只能經 `request_tenant_deletion` / `cancel_tenant_deletion`(僅店主);期滿由 `retention_delete_tenants`(worker)刪除;到期時還有未來預約:有在職店主就取消刪除(0029),沒有就延後到預約結束(0035) |
 | `users.email_verified_at` | 沒驗證不能建立店家。既有使用者上線前以註冊時間回填(視為已驗證)。證據:驗證信連結、重設密碼連結、接受寄到該 Email 的邀請 | 只能經 `verify_email` / `reset_password` / `accept_invitation`(SECURITY DEFINER) |
 | `users.sessions_revoked_at` | 「登出所有裝置」:簽發時間早於**或等於**它的 JWT 一律拒絕 | 只能經 `revoke_sessions` |
+| `email_changes` | 更換 Email 的確認連結(0036):新地址、只存 SHA-256、24 小時、一次性;同一人新的申請讓舊的作廢;每人每小時 3 次 + 新地址的收件量上限 | **只能經** `request_email_change` / `confirm_email_change`(SECURITY DEFINER,授權 runtime);完成時作廢未用的重設密碼 / 驗證連結、通知舊地址 |
 | `email_verifications` | 驗證連結(只存 SHA-256、24 小時、一次性) | **只能經** `request_email_verification` / `verify_email`;每位使用者每小時最多 3 封 |
 | `users.failed_logins` / `last_failed_login_at` / `locked_until` | 帳號鎖定:5 次 / 15 分鐘;鎖定中不再計數、不延長;距上次失敗超過 15 分鐘重算 | **只能經** `login_failed` / `login_succeeded`(SECURITY DEFINER);`tenant_app` 讀不到 |
 | `email_outbox.tenant_id` | 改為可空(重設密碼信不屬於任何店家);租戶角色因 RLS 看不到 NULL 列 | worker |

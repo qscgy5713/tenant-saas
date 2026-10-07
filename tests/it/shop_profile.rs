@@ -1,11 +1,10 @@
 //! 店家資訊(簡介、地址、電話):只有店主能改、驗證、顯示在公開預約頁。
-mod common;
 
+use crate::common::{add_member, app, call, create_tenant, signup};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
-use common::{add_member, app, call, create_tenant, signup};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 

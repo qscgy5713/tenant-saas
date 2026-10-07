@@ -28,6 +28,10 @@ pub fn credential_routes() -> Router<AppState> {
         .route("/auth/verify-email", post(verify_email))
         // 要登入 + 重新輸入密碼:放在這裡是為了套用每 IP 的限流(防止拿著被盜的登入狀態試密碼)
         .route("/auth/delete-account", post(delete_account))
+        // 同上:要重新輸入密碼
+        .route("/auth/change-email", post(change_email))
+        // 同 verify-email:不需要登入,token 是信裡的
+        .route("/auth/confirm-email-change", post(confirm_email_change))
 }
 
 pub fn routes() -> Router<AppState> {
@@ -450,6 +454,80 @@ async fn delete_account(
             (header::CACHE_CONTROL, "no-store".to_string()),
         ]),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeEmailRequest {
+    new_email: String,
+    password: String,
+}
+
+/// 申請更換 Email:重新輸入密碼(失敗計入鎖定),寄確認信到新地址,點了才真的換(見 migration 0036)。
+/// 新地址已被別的帳號使用時回 409 —— 和註冊時一樣會透露「這個 Email 已註冊」,但這裡需要登入 + 密碼,
+/// 比註冊端點更難拿來大量探測。
+async fn change_email(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(req): Json<ChangeEmailRequest>,
+) -> Result<(StatusCode, Json<Accepted>), AppError> {
+    let new_email = normalize_email(&req.new_email)?;
+    confirm_password(&state, auth.id, req.password).await?;
+    let raw = token::generate();
+    let link = mail::email_change_link(&state.public_base_url, &raw);
+    let msg = mail::email_change(&new_email, &link);
+    let result: String = sqlx::query_scalar("SELECT request_email_change($1, $2, $3, $4, $5, $6)")
+        .bind(auth.id)
+        .bind(&new_email)
+        .bind(token::hash(&raw))
+        .bind(&msg.subject)
+        .bind(&msg.body)
+        .bind(i32::try_from(state.max_mails_per_recipient_per_hour).unwrap_or(i32::MAX))
+        .fetch_one(&state.db)
+        .await?;
+    match result.as_str() {
+        "sent" => Ok((
+            StatusCode::ACCEPTED,
+            Json(Accepted {
+                message: "確認信已寄到新的 Email,開啟信中的連結後才會更換。",
+            }),
+        )),
+        "same" => Err(AppError::BadRequest("這就是你目前的 Email".into())),
+        "taken" => Err(AppError::Conflict("這個 Email 已經被其他帳號使用".into())),
+        "throttled" => Err(AppError::TooManyRequests),
+        _ => Err(AppError::Unauthorized),
+    }
+}
+
+/// 用新地址收到的 token 完成更換。token 無效、過期、已使用都是同一個錯誤
+async fn confirm_email_change(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyRequest>,
+) -> Result<Json<Accepted>, AppError> {
+    let token = req.token.trim();
+    let invalid = || AppError::BadRequest("連結無效或已過期,請登入後重新申請".into());
+    if !(16..=128).contains(&token.len()) {
+        return Err(invalid());
+    }
+    let (subject, body) = mail::email_changed_notice();
+    let result = sqlx::query_scalar::<_, Uuid>("SELECT confirm_email_change($1, $2, $3)")
+        .bind(token::hash(token))
+        .bind(&subject)
+        .bind(&body)
+        .fetch_one(&state.db)
+        .await;
+    match result {
+        Ok(user_id) => {
+            record_event(&state, user_id, "email_changed").await;
+            Ok(Json(Accepted {
+                message: "Email 已更換,之後請用新的 Email 登入。",
+            }))
+        }
+        Err(e) if pg_code(&e).as_deref() == Some(PG_NO_DATA_FOUND) => Err(invalid()),
+        Err(e) if pg_code(&e).as_deref() == Some("P0001") => Err(AppError::Conflict(
+            "這個 Email 在你確認之前已經被其他帳號註冊,請改用別的 Email".into(),
+        )),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// 記一筆帳號層級的安全事件。**記錄失敗不能讓登入 / 註冊等本來的動作失敗**,只留日誌

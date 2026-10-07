@@ -109,8 +109,10 @@ curl 127.0.0.1:3001/health
 ## 測試
 ```
 docker compose up -d postgres
-cargo test            # 一般測試,用超級使用者連線
+cargo test                          # 一般測試,用超級使用者連線
+cargo test --test it booking::      # 只跑某個檔案(tests/it/booking.rs)的測試
 ```
+整合測試都在 `tests/it/`,編成同一個執行檔(只連結一次,完整檢查快很多);新增測試檔要在 `tests/it/main.rs` 加上 `mod`。
 一般測試證明不了「正式環境用受限帳號時一切正常」。另有一個預設忽略的測試用受限帳號跑完整流程,
 需要乾淨的 PostgreSQL 叢集,步驟見 `docs/deployment.md` 末段與 `.github/workflows/ci.yml`。
 

@@ -1,10 +1,8 @@
-mod common;
-
+use crate::common::{add_member, app, call, create_tenant, set_plan, signup, user_id};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
-use common::{add_member, app, call, create_tenant, set_plan, signup, user_id};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 

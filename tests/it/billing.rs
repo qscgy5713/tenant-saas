@@ -1,10 +1,11 @@
-mod common;
+use crate::common;
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+use crate::common::{add_member, call, create_tenant, signup, test_config};
 use axum::{
     Form, Json, Router,
     body::Body,
@@ -12,7 +13,6 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode, header},
     routing::post,
 };
-use common::{add_member, call, create_tenant, signup, test_config};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;

@@ -1991,5 +1991,8 @@
 
 .shops-foot {
   margin-top: 32px;
-  text-align: center;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px 24px;
 }

@@ -1,9 +1,7 @@
 //! 每位使用者可擁有的店家數量上限。
 
-mod common;
-
+use crate::common::{add_member, app, call, create_tenant, signup, test_config};
 use axum::{Router, http::Method, http::StatusCode};
-use common::{add_member, app, call, create_tenant, signup, test_config};
 use serde_json::json;
 use sqlx::PgPool;
 use tenant_saas::{

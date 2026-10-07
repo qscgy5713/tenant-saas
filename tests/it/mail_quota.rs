@@ -1,12 +1,12 @@
 //! 每位收件者每小時的寄信上限(跨店家)與邀請端點的限流。
 
-mod common;
+use crate::common;
 
-use axum::{Router, http::Method, http::StatusCode};
-use common::{
+use crate::common::{
     add_member, app_with_auth_limit, call, create_service, create_tenant, signup, test_config,
     user_id,
 };
+use axum::{Router, http::Method, http::StatusCode};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::{

@@ -47,6 +47,7 @@ export interface AccountEvent {
     | 'logout_all'
     | 'password_reset'
     | 'email_verified'
+    | 'email_changed'
   created_at: string
 }
 

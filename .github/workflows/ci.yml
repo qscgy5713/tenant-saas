@@ -77,6 +77,31 @@ jobs:
         run: cargo test --locked --test restricted_role -- --ignored
         env:
           RESTRICTED_RUNTIME_URL: postgres://tenant_runtime:runtime-pw@localhost:5432/tenant_saas
+      # 上面跑完後資料庫裡有各種資料(含 FORCE RLS 的 customers / services)。用正式環境的備份帳號實際備份、
+      # 還原到另一個資料庫,逐表比對筆數:確認備份帳號的權限足夠,而且 RLS 沒有讓任何表靜悄悄地變成空的
+      - name: 佈建備份帳號
+        run: psql "postgres://postgres@localhost:5432/postgres" -v ON_ERROR_STOP=1 -v backup_password="'backup-pw'" -f deploy/provision_backup.sql
+      - name: 以備份帳號實際備份並還原比對
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          BACKUP_DATABASE_URL=postgres://tenant_backup:backup-pw@localhost:5432/tenant_saas BACKUP_DIR="$dir" \
+            PG_DUMP="docker run --rm --network host postgres:17 pg_dump" \
+            PG_RESTORE="docker run --rm -i --network host postgres:17 pg_restore" \
+            bash deploy/backup.sh
+          psql "postgres://postgres@localhost:5432/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE restore_check"
+          docker run --rm -i --network host -e PGPASSWORD=admin-pw postgres:17 \
+            pg_restore --no-owner -d postgres://postgres@localhost:5432/restore_check < "$(ls "$dir"/*.dump)"
+          q="SELECT string_agg(relname || '=' || n, ' ' ORDER BY relname) FROM (
+               SELECT 'users' AS relname, count(*) AS n FROM users UNION ALL SELECT 'tenants', count(*) FROM tenants
+               UNION ALL SELECT 'memberships', count(*) FROM memberships UNION ALL SELECT 'customers', count(*) FROM customers
+               UNION ALL SELECT 'services', count(*) FROM services UNION ALL SELECT 'working_hours', count(*) FROM working_hours
+               UNION ALL SELECT 'bookings', count(*) FROM bookings UNION ALL SELECT 'audit_logs', count(*) FROM audit_logs) x"
+          src=$(psql "postgres://postgres@localhost:5432/tenant_saas" -tAc "$q")
+          dst=$(psql "postgres://postgres@localhost:5432/restore_check" -tAc "$q")
+          echo "來源:$src"; echo "還原:$dst"
+          [ "$src" = "$dst" ]
+          psql "postgres://postgres@localhost:5432/tenant_saas" -tAc "SELECT count(*) > 0 FROM customers" | grep -q t
 
   # 前端:排版、靜態檢查、型別、測試、建置
   web:

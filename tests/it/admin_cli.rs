@@ -1,8 +1,7 @@
 //! 營運人員的維運指令(`tenant-saas admin …`)。
-mod common;
 
+use crate::common::{add_member, app, call, create_tenant, signup};
 use axum::http::{Method, StatusCode};
-use common::{add_member, app, call, create_tenant, signup};
 use sqlx::PgPool;
 use tenant_saas::admin_cli::run;
 

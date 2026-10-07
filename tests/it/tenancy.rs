@@ -1,7 +1,5 @@
-mod common;
-
+use crate::common::{add_member, app, call, create_tenant, signup};
 use axum::http::{Method, StatusCode};
-use common::{add_member, app, call, create_tenant, signup};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tenant_saas::db::begin_scoped;

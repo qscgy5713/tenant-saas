@@ -1,13 +1,11 @@
-mod common;
-
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::common::{app, call, create_service, create_tenant, signup, test_config};
 use axum::{
     Router,
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
-use common::{app, call, create_service, create_tenant, signup, test_config};
 use http_body_util::BodyExt;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde_json::json;

@@ -64,6 +64,14 @@ export const getMe = () => call<User>('/auth/me')
 export const verifyEmail = (token: string) =>
   api<{ message: string }>('/auth/verify-email', json({ token }))
 
+/** 申請更換 Email:要重新輸入密碼;確認信寄到新地址,點了才換 */
+export const requestEmailChange = (newEmail: string, password: string) =>
+  call<{ message: string }>('/auth/change-email', json({ new_email: newEmail, password }))
+
+/** 用寄到新地址的連結完成更換(不需要登入) */
+export const confirmEmailChange = (token: string) =>
+  api<{ message: string }>('/auth/confirm-email-change', json({ token }))
+
 export const resendVerification = () =>
   call<{ message: string }>('/auth/resend-verification', { method: 'POST' })
 

@@ -1,11 +1,10 @@
 //! 帳號層級的安全事件:只有本人看得到、不含 IP / 裝置、會過期。
-mod common;
 
+use crate::common::{app, call, register, signup};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
-use common::{app, call, register, signup};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::worker::retention_sweep;

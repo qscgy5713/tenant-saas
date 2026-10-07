@@ -1,14 +1,12 @@
-mod common;
-
+use crate::common::{
+    add_member, app, app_with_rate_limit, call, create_service, create_tenant, signup, user_id,
+};
 use axum::{
     Router,
     http::{Method, StatusCode},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use chrono_tz::Asia::Taipei;
-use common::{
-    add_member, app, app_with_rate_limit, call, create_service, create_tenant, signup, user_id,
-};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tenant_saas::availability::local_to_utc;
@@ -100,7 +98,7 @@ async fn add_second_staff(pool: &PgPool, s: &Shop) -> (String, Uuid) {
     (token, id)
 }
 
-/// 以 owner 代客預約(直接確認)。顧客自助預約需要 Email 確認,見 tests/worker.rs。
+/// 以 owner 代客預約(直接確認)。顧客自助預約需要 Email 確認,見 tests/it/worker.rs。
 async fn book(
     app: &Router,
     s: &Shop,
@@ -1540,7 +1538,7 @@ async fn staff_with_upcoming_confirmed_bookings_cannot_be_deactivated(pool: PgPo
     assert_eq!(staff_names.len(), 2, "{list}");
     assert!(staff_names.iter().all(|n| n == "小明"), "{staff_names:?}");
 
-    // 待確認的預約沒有被偷偷改派給別人;顧客之後來確認會失敗,見 tests/worker.rs 的
+    // 待確認的預約沒有被偷偷改派給別人;顧客之後來確認會失敗,見 tests/it/worker.rs 的
     // confirming_after_the_staff_was_deactivated_fails_cleanly
     let staff: Uuid = sqlx::query_scalar("SELECT staff_user_id FROM bookings WHERE id = $1::uuid")
         .bind(id)

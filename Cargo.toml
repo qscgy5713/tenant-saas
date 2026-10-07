@@ -30,3 +30,12 @@ uuid = { version = "1.26.1", features = ["v4", "serde"] }
 [dev-dependencies]
 http-body-util = "0.1.5"
 tower = { version = "0.5.3", features = ["util"] }
+
+# 密碼雜湊(argon2)在未最佳化的 debug 建置下非常慢,而幾乎每個整合測試都會註冊 / 登入。
+# 只對這幾個相依套件開最佳化:測試與本機開發快很多,我們自己的程式碼仍是 debug(可除錯、編譯快)。
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

@@ -1,7 +1,7 @@
-mod common;
+use crate::common;
 
+use crate::common::{app, app_with_auth_limit, call, register, signup, test_config};
 use axum::http::{Method, StatusCode};
-use common::{app, app_with_auth_limit, call, register, signup, test_config};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::time::Duration;
