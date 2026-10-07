@@ -8,25 +8,37 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
-    init_logging();
+    let command = std::env::args().nth(1);
+    // 維運指令的標準輸出只能有資料(例如 `admin export-audit | gzip`),日誌一律改走標準錯誤
+    init_logging(command.as_deref() == Some("admin"));
 
-    match std::env::args().nth(1).as_deref() {
+    match command.as_deref() {
         None | Some("serve") => serve().await,
         Some("migrate") => migrate().await,
         Some("healthcheck") => healthcheck().await,
-        Some(other) => bail!("未知的子命令:{other}(可用:serve、migrate、healthcheck)"),
+        Some("admin") => admin().await,
+        Some(other) => bail!("未知的子命令:{other}(可用:serve、migrate、healthcheck、admin)"),
     }
 }
 
-fn init_logging() {
+fn init_logging(to_stderr: bool) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if std::env::var("LOG_FORMAT").is_ok_and(|v| v == "json") {
-        tracing_subscriber::fmt()
+    let json = std::env::var("LOG_FORMAT").is_ok_and(|v| v == "json");
+    match (json, to_stderr) {
+        (true, false) => tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+            .init(),
+        (true, true) => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init(),
+        (false, false) => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        (false, true) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init(),
     }
 }
 
@@ -44,6 +56,24 @@ async fn migrate() -> Result<()> {
         .context("無法連線到資料庫")?;
     sqlx::migrate!("./migrations").run(&db).await?;
     tracing::info!("migration 完成");
+    Ok(())
+}
+
+/// `tenant-saas admin <指令>`:營運人員的維運指令(見 `admin_cli`)。
+/// 用 MIGRATION_DATABASE_URL 連線:runtime 帳號讀不到租戶資料表。
+async fn admin() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let url = std::env::var("MIGRATION_DATABASE_URL")
+        .context("缺少 MIGRATION_DATABASE_URL(擁有資料表的帳號;runtime 帳號讀不到租戶資料表)")?;
+    let db = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&url)
+        .await
+        .context("無法連線到資料庫")?;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    tenant_saas::admin_cli::run(&db, &args, &mut out).await?;
+    std::io::Write::flush(&mut out)?;
     Ok(())
 }
 

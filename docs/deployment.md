@@ -176,6 +176,36 @@ nginx 設定(`web/nginx.conf.template`)刻意做的事,因為**預約管理頁�
 - 嚴格的 CSP(只允許同源的腳本與樣式)、`frame-ancestors 'none'`(不能被嵌進別人的頁面)
 - 帶 hash 的 `/assets/` 永久快取;不存在的資產回 404(不被 SPA 的 fallback 吃掉)
 
+## 維運指令
+
+營運人員用的命令列工具,是 `tenant-saas` 執行檔的子命令(映像裡本來就有,不需要另外裝東西、沒有新的網路攻擊面)。
+用 **migrator 帳號**連線(`MIGRATION_DATABASE_URL`):runtime 帳號讀不到租戶資料表,這是設計上的。
+
+```bash
+A='docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod --profile ops run --rm admin'
+$A plans                          # 方案與限額
+$A shops 20                       # 最新 20 家:方案、狀態、成員數、近 30 天預約數、預定刪除日
+$A show my-salon                  # 一家店的詳細資料(店主、用量、訂閱、刪除狀態)
+$A set-plan my-salon pro          # 變更方案(寫稽核 operator.plan_changed,店主在稽核頁看得到)
+$A suspend my-salon               # 暫停:後台與預約頁都進不去,資料與訂閱不動(寫稽核)
+$A unsuspend my-salon
+$A export-audit 700 | gzip > audit-$(date +%F).jsonl.gz   # 稽核歸檔(見下)
+```
+
+- 所有會改資料的指令都寫稽核(actor = 系統,動作以 `operator.` 開頭)。店家代稱先驗證格式才查詢。
+- 標準輸出只有資料(日誌與摘要走標準錯誤),所以可以直接接 `gzip`。
+
+**稽核日誌歸檔**:背景任務會依 `AUDIT_RETENTION_DAYS`(預設 730)刪除過期的稽核日誌。要保留舊紀錄,在它動手**之前**
+定期把「快要過期」的匯出(例如每週一次,匯出超過 `保留天數 − 30` 天的):
+
+```bash
+# crontab:每週一 03:30,保留 730 天 → 歸檔超過 700 天的(和已歸檔的重疊沒關係,id 可用來去重)
+30 3 * * 1  $A export-audit 700 | gzip > /var/backups/tenant-saas/audit-$(date +\%F).jsonl.gz
+```
+
+格式是 JSON Lines(一行一筆,依 id 由舊到新,含店家代稱):**不用 CSV**,因為 CSV 為了防試算表公式注入會改動欄位開頭,
+歸檔要原樣保存。歸檔檔含所有店家的操作紀錄,請設嚴格的檔案權限並放在資料庫主機以外的地方。
+
 ## 映像與依賴的安全掃描
 
 CI 每次推送與**每週一**(`schedule`:漏洞資料庫每天更新,程式沒動也可能出現新漏洞)都會:
@@ -269,10 +299,10 @@ BACKUP_DIR=/var/backups/tenant-saas  deploy/backup.sh
 **上線前請評估(已完成的打勾,沒勾的是尚未做):**
 
 - [x] **Stripe / 計費**:結帳、客戶入口、webhook、付款失敗通知已實作;**尚未用真實 Stripe 帳號驗證**。沒設定 `STRIPE_*` 時方案仍只能由營運人員改資料庫
-- [ ] 營運人員後台 / 平台超級管理員(跨租戶管理)
+- [x] 營運人員:**命令列維運指令**(`tenant-saas admin …`,見「維運指令」),不做網頁後台(決定理由見 decisions)
 - [x] 帳號鎖定(5 次 / 15 分鐘);告警建議:`account_locked_total` 突然升高代表有人在猜密碼
 - [x] 註冊 Email 驗證(沒驗證不能建立店家)、登出所有裝置。**不做 refresh token**:每個請求本來就查資料庫,改密碼 / 登出所有裝置都會立刻讓舊 token 失效(見 decisions)。缺的是「單一裝置登出」與「session 清單」
-- [x] 資料保留與刪除(顧客個資自動匿名化、稽核日誌到期清除、刪除店家);使用者帳號刪除、備份腳本與到期清理也已完成;**尚缺**:稽核日誌的歸檔(目前是直接刪除,見上方「資料保留與刪除」)、備份的異地複製與加密(腳本只負責產生與清理)
+- [x] 資料保留與刪除(顧客個資自動匿名化、稽核日誌到期清除、刪除店家);使用者帳號刪除、備份腳本與到期清理也已完成;稽核日誌可在清除前用 `admin export-audit` 歸檔;**尚缺**:備份的異地複製與加密(腳本只負責產生與清理)、排程(cron)要自己設
 - [ ] 全域(跨實例)限流
 - [x] 告警規則檔(`deploy/alerts.yml`)
 - [ ] 分散式追蹤

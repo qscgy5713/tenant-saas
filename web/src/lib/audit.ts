@@ -42,6 +42,9 @@ const ACTION_LABEL: Record<string, string> = {
   'tenant.deletion_cancelled': '取消刪除店家',
   'audit.purged': '清除過期的稽核紀錄',
   'ownership.transferred': '移交店主身分',
+  'operator.plan_changed': '營運人員變更方案',
+  'operator.suspended': '營運人員暫停店家',
+  'operator.unsuspended': '營運人員恢復店家',
   'tenant.profile_updated': '修改店家資訊',
   'member.account_deleted': '刪除帳號',
 }
@@ -113,6 +116,11 @@ export function describeDetail(entry: AuditEntry, timeZone: string): string | nu
       return str(d.scheduled_at)
         ? `預定 ${formatDateTime(str(d.scheduled_at)!, timeZone)} 永久刪除`
         : null
+    case 'operator.plan_changed': {
+      const from = str(d.from)
+      const to = str(d.to)
+      return from && to ? `${PLAN_NAME[from] ?? from} → ${PLAN_NAME[to] ?? to}` : null
+    }
     case 'tenant.profile_updated': {
       const changed = Array.isArray(d.changed) ? d.changed.filter((x) => typeof x === 'string') : []
       const names: Record<string, string> = { description: '簡介', address: '地址', phone: '電話' }

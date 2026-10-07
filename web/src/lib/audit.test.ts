@@ -127,6 +127,25 @@ describe('describeDetail', () => {
     expect(actionLabel('tenant.deletion_cancelled')).toBe('取消刪除店家')
   })
 
+  it('營運人員的操作(命令列做的,actor 是系統)', () => {
+    expect(actionLabel('operator.suspended')).toBe('營運人員暫停店家')
+    expect(actionLabel('operator.unsuspended')).toBe('營運人員恢復店家')
+    expect(
+      describeDetail(
+        entry({ action: 'operator.plan_changed', detail: { from: 'free', to: 'pro' } }),
+        tz,
+      ),
+    ).toBe('免費版 → 專業版')
+    // 不認識的方案原樣顯示;缺欄位不丟例外
+    expect(
+      describeDetail(
+        entry({ action: 'operator.plan_changed', detail: { from: 'free', to: 'gold' } }),
+        tz,
+      ),
+    ).toBe('免費版 → gold')
+    expect(describeDetail(entry({ action: 'operator.plan_changed', detail: {} }), tz)).toBeNull()
+  })
+
   it('移交店主、店家資訊、系統取消刪除', () => {
     expect(actionLabel('ownership.transferred')).toBe('移交店主身分')
     expect(actionLabel('member.account_deleted')).toBe('刪除帳號')

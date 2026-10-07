@@ -53,6 +53,21 @@ services:
       DATABASE_URL: ${DATABASE_URL:?}
     command: ["migrate"]
 
+  # 營運人員的維運指令(見 docs/deployment.md「維運指令」):
+  #   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod --profile ops run --rm admin shops
+  #   … run --rm admin set-plan 店家代稱 pro
+  #   … run --rm admin export-audit 700 | gzip > audit-$(date +%F).jsonl.gz
+  # 用 migrator 帳號(runtime 帳號讀不到租戶資料表)。標準輸出只有資料,日誌走標準錯誤
+  admin:
+    profiles: [ops]
+    image: tenant-saas:${APP_VERSION:-latest}
+    entrypoint: ["tenant-saas", "admin"]
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?migrator 帳號的連線字串}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
   prometheus:
     profiles: [monitoring]
     image: prom/prometheus:latest

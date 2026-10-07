@@ -136,6 +136,7 @@ async fn register(
         Err(err) => return Err(err.into()),
     };
 
+    metrics::counter!("registrations_total").increment(1);
     record_event(&state, user.id, "registered").await;
     // 驗證信寄不出去不該讓註冊失敗(使用者之後可以重寄),但要留下紀錄
     if state.require_verified_email

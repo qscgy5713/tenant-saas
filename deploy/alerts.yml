@@ -65,6 +65,14 @@ groups:
           summary: 短時間內大量帳號被鎖定
           description: 可能有人在猜密碼(撞庫)。看來源 IP 與限流設定。
 
+      - alert: RegistrationSpike
+        # 沒有 CAPTCHA:註冊量異常暴增通常是有人在灌帳號 / 拿別人的 Email 當收件者(每個註冊會寄一封驗證信)
+        expr: increase(registrations_total[10m]) > 30
+        labels: { severity: warning }
+        annotations:
+          summary: 10 分鐘內註冊超過 30 個帳號
+          description: 看來源 IP 與 AUTH_RATE_LIMIT_PER_MIN;必要時暫時調低限流,或在反向代理上擋掉來源。
+
       - alert: PaymentFailuresHigh
         # 只在有啟用 Stripe 時才有意義
         expr: increase(payment_failed_notified_total[1d]) > 20

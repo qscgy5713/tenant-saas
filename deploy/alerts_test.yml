@@ -50,3 +50,23 @@ tests:
           - exp_labels: { severity: critical }
             exp_annotations:
               summary: 5xx 比例超過 1%
+  - interval: 1m
+    input_series:
+      - series: 'registrations_total'
+        values: '0+4x20'   # 每分鐘 4 個 → 10 分鐘 40 個
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RegistrationSpike
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: 10 分鐘內註冊超過 30 個帳號
+              description: 看來源 IP 與 AUTH_RATE_LIMIT_PER_MIN;必要時暫時調低限流,或在反向代理上擋掉來源。
+  - interval: 1m
+    input_series:
+      - series: 'registrations_total'
+        values: '0+2x20'   # 每分鐘 2 個 → 10 分鐘 20 個:正常
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: RegistrationSpike
+        exp_alerts: []
